@@ -23,6 +23,8 @@
   var userBar = document.getElementById('user-bar');
   var loginError = document.getElementById('login-error');
   var currentTab = null;
+  var tripsFilter = { date: '', taxi_id: '', driver_id: '' };
+  var expensesFilter = { date: '', taxi_id: '', driver_id: '' };
 
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
@@ -492,9 +494,19 @@
   // ---------- Viajes ----------
 
   async function renderTrips() {
-    var trips = await api('/api/trips');
+    var tripsQuery = [];
+    if (tripsFilter.date) tripsQuery.push('date=' + encodeURIComponent(tripsFilter.date));
+    if (tripsFilter.taxi_id) tripsQuery.push('taxi_id=' + encodeURIComponent(tripsFilter.taxi_id));
+    if (tripsFilter.driver_id) tripsQuery.push('driver_id=' + encodeURIComponent(tripsFilter.driver_id));
+    var trips = await api('/api/trips' + (tripsQuery.length ? '?' + tripsQuery.join('&') : ''));
     var methods = [];
     try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
+    var taxis = [];
+    try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
+    var drivers = [];
+    if (user.role === 'admin') {
+      try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+    }
     var title = user.role === 'admin' ? 'Todos los viajes' : 'Mis viajes';
     var rows = trips.map(function (t) {
       var shiftLine = t.entry_time
@@ -506,7 +518,36 @@
         '<button type="button" class="secondary small" data-edit-trip="' + t.id + '">Editar</button> ' +
         '<button type="button" class="danger small" data-del-trip="' + t.id + '">Borrar</button></div>';
     }).join('');
-    contentEl.innerHTML = '<h2>' + title + '</h2>' + (rows || '<p class="muted">Todavía no hay viajes.</p>');
+    var taxiOptions = '<option value="">Todos los autos</option>' + taxis.map(function (t) {
+      return '<option value="' + t.id + '"' + (String(t.id) === tripsFilter.taxi_id ? ' selected' : '') + '>' + esc(t.identifier) + '</option>';
+    }).join('');
+    var driverFilterHtml = '';
+    if (user.role === 'admin') {
+      driverFilterHtml = '<label>Chofer <select name="driver_id"><option value="">Todos los choferes</option>' + drivers.map(function (d) {
+        return '<option value="' + d.id + '"' + (String(d.id) === tripsFilter.driver_id ? ' selected' : '') + '>' + esc(d.name) + '</option>';
+      }).join('') + '</select></label>';
+    }
+    var filterHtml = '<form id="trips-filter" class="row">' +
+      '<label>Día <input name="date" type="date" value="' + esc(tripsFilter.date) + '"></label>' +
+      '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
+      driverFilterHtml +
+      '<button type="button" id="trips-filter-clear">Limpiar filtros</button></form>';
+    contentEl.innerHTML = '<h2>' + title + '</h2>' + filterHtml + (rows || '<p class="muted">Todavía no hay viajes.</p>');
+    var filterForm = document.getElementById('trips-filter');
+    if (filterForm) {
+      filterForm.addEventListener('change', function () {
+        tripsFilter.date = filterForm.date.value;
+        tripsFilter.taxi_id = filterForm.taxi_id.value;
+        tripsFilter.driver_id = filterForm.driver_id ? filterForm.driver_id.value : '';
+        renderTrips();
+      });
+      filterForm.addEventListener('submit', function (ev) { ev.preventDefault(); });
+      var clearBtn = document.getElementById('trips-filter-clear');
+      if (clearBtn) clearBtn.addEventListener('click', function () {
+        tripsFilter.date = ''; tripsFilter.taxi_id = ''; tripsFilter.driver_id = '';
+        renderTrips();
+      });
+    }
     contentEl.querySelectorAll('[data-edit-trip]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var t = trips.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-trip'); });
@@ -659,7 +700,17 @@
   // ---------- Gastos ----------
 
   async function renderExpenses() {
-    var expenses = await api('/api/expenses');
+    var expensesQuery = [];
+    if (expensesFilter.date) expensesQuery.push('date=' + encodeURIComponent(expensesFilter.date));
+    if (expensesFilter.taxi_id) expensesQuery.push('taxi_id=' + encodeURIComponent(expensesFilter.taxi_id));
+    if (expensesFilter.driver_id) expensesQuery.push('driver_id=' + encodeURIComponent(expensesFilter.driver_id));
+    var expenses = await api('/api/expenses' + (expensesQuery.length ? '?' + expensesQuery.join('&') : ''));
+    var taxis = [];
+    try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
+    var drivers = [];
+    if (user.role === 'admin') {
+      try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+    }
     var title = user.role === 'admin' ? 'Todos los gastos' : 'Mis gastos';
     var formHtml = '';
     if (user.role === 'driver') {
@@ -678,7 +729,36 @@
         (g.has_receipt ? '<button type="button" class="small" data-receipt-expense="' + g.id + '">Ver factura</button> ' : '') +
         '<button type="button" class="danger small" data-del-expense="' + g.id + '">Borrar</button></div>';
     }).join('');
-    contentEl.innerHTML = '<h2>' + title + '</h2>' + formHtml + '<h3>Lista</h3>' + (rows || '<p class="muted">Todavía no hay gastos.</p>');
+    var taxiOptions = '<option value="">Todos los autos</option>' + taxis.map(function (t) {
+      return '<option value="' + t.id + '"' + (String(t.id) === expensesFilter.taxi_id ? ' selected' : '') + '>' + esc(t.identifier) + '</option>';
+    }).join('');
+    var driverFilterHtml = '';
+    if (user.role === 'admin') {
+      driverFilterHtml = '<label>Chofer <select name="driver_id"><option value="">Todos los choferes</option>' + drivers.map(function (d) {
+        return '<option value="' + d.id + '"' + (String(d.id) === expensesFilter.driver_id ? ' selected' : '') + '>' + esc(d.name) + '</option>';
+      }).join('') + '</select></label>';
+    }
+    var filterHtml = '<form id="expenses-filter" class="row">' +
+      '<label>Día <input name="date" type="date" value="' + esc(expensesFilter.date) + '"></label>' +
+      '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
+      driverFilterHtml +
+      '<button type="button" id="expenses-filter-clear">Limpiar filtros</button></form>';
+    contentEl.innerHTML = '<h2>' + title + '</h2>' + formHtml + filterHtml + '<h3>Lista</h3>' + (rows || '<p class="muted">Todavía no hay gastos.</p>');
+    var filterForm = document.getElementById('expenses-filter');
+    if (filterForm) {
+      filterForm.addEventListener('change', function () {
+        expensesFilter.date = filterForm.date.value;
+        expensesFilter.taxi_id = filterForm.taxi_id.value;
+        expensesFilter.driver_id = filterForm.driver_id ? filterForm.driver_id.value : '';
+        renderExpenses();
+      });
+      filterForm.addEventListener('submit', function (ev) { ev.preventDefault(); });
+      var clearBtn = document.getElementById('expenses-filter-clear');
+      if (clearBtn) clearBtn.addEventListener('click', function () {
+        expensesFilter.date = ''; expensesFilter.taxi_id = ''; expensesFilter.driver_id = '';
+        renderExpenses();
+      });
+    }
     var form = document.getElementById('expense-form');
     if (form) {
       form.addEventListener('submit', async function (ev) {

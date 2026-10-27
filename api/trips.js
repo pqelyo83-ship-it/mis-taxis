@@ -155,6 +155,10 @@ module.exports = async function handler(req, res) {
       params.push(String(req.query.date));
       conditions.push('tr.trip_date = $' + params.length);
     }
+    if (req.query && req.query.taxi_id) {
+      params.push(Number(req.query.taxi_id));
+      conditions.push('tr.taxi_id = $' + params.length);
+    }
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
     const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY tr.trip_date DESC, tr.entry_time DESC', params);
     res.status(200).json(result.rows.map(withSplit));

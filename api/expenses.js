@@ -65,19 +65,32 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method === 'GET') {
-    let result;
-    if (user.role === 'admin') {
-      result = await pool.query(
-        `SELECT e.*, u.name AS driver_name FROM expenses e
-         JOIN users u ON u.id = e.driver_id WHERE e.company_id = $1 ORDER BY e.expense_date DESC, e.id DESC`,
-        [user.company_id]
-      );
-    } else {
-      result = await pool.query(
-        'SELECT * FROM expenses WHERE driver_id = $1 AND company_id = $2 ORDER BY expense_date DESC, id DESC',
-        [user.id, user.company_id]
-      );
+    // Filtros: día (expense_date), auto (taxi de la jornada de ese día)
+    // y chofer (solo admin; el chofer siempre ve solo sus gastos).
+    const conditions = ['e.company_id = $1'];
+    const params = [user.company_id];
+    if (user.role === 'driver') {
+      params.push(user.id);
+      conditions.push('e.driver_id = $' + params.length);
+    } else if (req.query && req.query.driver_id) {
+      params.push(Number(req.query.driver_id));
+      conditions.push('e.driver_id = $' + params.length);
     }
+    if (req.query && req.query.date) {
+      params.push(String(req.query.date));
+      conditions.push('e.expense_date = $' + params.length);
+    }
+    let join = '';
+    if (req.query && req.query.taxi_id) {
+      join = ' LEFT JOIN day_shifts s ON s.driver_id = e.driver_id AND s.shift_date = e.expense_date AND s.company_id = e.company_id';
+      params.push(Number(req.query.taxi_id));
+      conditions.push('s.taxi_id = $' + params.length);
+    }
+    const result = await pool.query(
+      'SELECT e.*, u.name AS driver_name FROM expenses e JOIN users u ON u.id = e.driver_id' + join +
+      ' WHERE ' + conditions.join(' AND ') + ' ORDER BY e.expense_date DESC, e.id DESC',
+      params
+    );
     res.status(200).json(result.rows.map(publicExpense));
     return;
   }
