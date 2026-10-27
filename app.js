@@ -1117,6 +1117,7 @@
     var origin = window.location.origin;
     var rows = companies.map(function (c) {
       var link = origin + '/?company=' + esc(c.code) + '&login=owner';
+      var companyLink = origin + '/?company=' + esc(c.code);
       var isOwn = user.company_id === c.id;
       var actions = isOwn
         ? '<p class="muted">Tu empresa (se administra desde tu link de dueño principal).</p>'
@@ -1129,7 +1130,9 @@
         (isOwn ? ' · Tu empresa' : '') + '</p>' +
         '<p>Dueño: ' + esc(c.owner_name || '—') + (c.owner_email ? ' (' + esc(c.owner_email) + ')' : '') + '</p>' +
         '<p>Estado: ' + (c.active ? 'Activa' : 'Suspendida') + ' · Pago: ' + (c.payment_status === 'paid' ? 'Al día' : 'Pendiente') + '</p>' +
-        '<p>Link: <a href="' + link + '">' + link + '</a></p>' + actions + '</div>';
+        '<p>Link empresa (admin + choferes): <a href="' + companyLink + '">' + companyLink + '</a> ' +
+        '<button type="button" class="small" data-copy-link="' + companyLink + '">Copiar</button></p>' +
+        '<p>Link dueño (email y PIN): <a href="' + link + '">' + link + '</a></p>' + actions + '</div>';
     }).join('');
     contentEl.innerHTML = '<h2>Empresas</h2>' +
       '<p class="muted">Solo vos ves este panel. Acá das de alta a los dueños y los manejás según su pago: podés suspender a quien no pagó (deja de poder entrar) y reactivarlo cuando pague. Borrar elimina la empresa y todos sus datos y no se puede deshacer.</p>' +
@@ -1152,9 +1155,31 @@
           pin: f.pin.value,
         });
         var ownerLink = window.location.origin + '/?company=' + result.company.code + '&login=owner';
-        showMessage('Empresa creada: ' + result.company.name + ' — código ' + result.company.code + '. Link para el dueño: ' + ownerLink + ' — pasale ese link con su email y PIN.', 'ok');
+        var companyLink = window.location.origin + '/?company=' + result.company.code;
+        showMessage('Empresa creada: ' + result.company.name + ' — código ' + result.company.code + '. Link empresa (admin + choferes, para enviar cuando paguen): ' + companyLink + ' — Link dueño (email y PIN): ' + ownerLink + '.', 'ok');
         renderTab();
       } catch (e) { showMessage(e.message, 'error'); }
+    });
+    contentEl.querySelectorAll('[data-copy-link]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var url = btn.getAttribute('data-copy-link');
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(url);
+            showMessage('Link copiado.', 'ok');
+            return;
+          }
+          throw new Error('sin clipboard');
+        } catch (e) {
+          var tmp = document.createElement('textarea');
+          tmp.value = url;
+          document.body.appendChild(tmp);
+          tmp.select();
+          try { document.execCommand('copy'); showMessage('Link copiado.', 'ok'); }
+          catch (e2) { showMessage('No se pudo copiar: ' + url, 'error'); }
+          tmp.remove();
+        }
+      });
     });
     contentEl.querySelectorAll('[data-toggle-active]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
