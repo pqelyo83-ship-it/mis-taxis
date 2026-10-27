@@ -204,6 +204,23 @@
       var u = await api('/api/login-users?company_id=' + encodeURIComponent(c.id) + '&name=' + encodeURIComponent(userName));
       if (!u || !u.id) throw new Error('sin usuario');
       fixedLogin = { company_id: c.id, user_id: u.id };
+      // Los dos desplegables quedan ocultos pero con su valor puesto: si un
+      // campo obligatorio y oculto queda vacío, el navegador bloquea el
+      // envío del formulario y el botón Entrar no hace nada.
+      var companySelect = document.getElementById('company-select');
+      companySelect.innerHTML = '';
+      var copt = document.createElement('option');
+      copt.value = c.id;
+      copt.textContent = c.name + ' (' + c.code + ')';
+      companySelect.appendChild(copt);
+      companySelect.value = c.id;
+      var userSelect = document.getElementById('user-select');
+      userSelect.innerHTML = '';
+      var uopt = document.createElement('option');
+      uopt.value = u.id;
+      uopt.textContent = u.name;
+      userSelect.appendChild(uopt);
+      userSelect.value = u.id;
       document.getElementById('company-select-block').classList.add('hidden');
       document.getElementById('fixed-company-name').classList.add('hidden');
       document.querySelector('label[for="user-select"]').classList.add('hidden');
