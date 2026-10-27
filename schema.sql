@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS companies (
   night_start INT NOT NULL DEFAULT 22 CHECK (night_start >= 0 AND night_start <= 23),
   night_end INT NOT NULL DEFAULT 6 CHECK (night_end >= 0 AND night_end <= 23),
   active BOOLEAN NOT NULL DEFAULT TRUE,
+  payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('paid', 'pending')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

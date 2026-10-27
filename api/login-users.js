@@ -13,6 +13,12 @@ module.exports = async function handler(req, res) {
     res.status(400).json({ error: 'Falta la empresa' });
     return;
   }
+  // Empresa suspendida: no se lista a nadie.
+  const company = await getPool().query('SELECT id FROM companies WHERE id = $1 AND active = TRUE', [companyId]);
+  if (!company.rows[0]) {
+    res.status(200).json([]);
+    return;
+  }
   const result = await getPool().query(
     "SELECT id, name, role FROM users WHERE active = TRUE AND company_id = $1 AND pin_hash IS NOT NULL AND email IS NULL ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name",
     [companyId]

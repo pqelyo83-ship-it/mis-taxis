@@ -13,7 +13,7 @@ const USER_SELECT = `
          u.commission_day_pct, u.commission_night_pct, u.pin_hash, u.pin_salt,
          u.password_hash,
          u.active, u.company_id, c.name AS company_name, c.code AS company_code,
-         c.night_start, c.night_end
+         c.night_start, c.night_end, c.active AS company_active
   FROM users u LEFT JOIN companies c ON c.id = u.company_id
 `;
 
@@ -65,6 +65,10 @@ module.exports = async function handler(req, res) {
     const row = result.rows[0];
     if (!row || !row.active || !row.pin_hash || !row.pin_salt) {
       res.status(401).json({ error: 'Email o PIN incorrectos' });
+      return;
+    }
+    if (row.company_active === false) {
+      res.status(401).json({ error: 'Empresa suspendida, contactá al encargado' });
       return;
     }
     const digest = hashPin(pin, row.pin_salt);
@@ -128,6 +132,11 @@ module.exports = async function handler(req, res) {
   // Si se indicó empresa, el usuario debe pertenecer a ella.
   if (body.company_id !== undefined && body.company_id !== '' && Number(body.company_id) !== match.company_id) {
     res.status(401).json({ error: 'PIN incorrecto' });
+    return;
+  }
+  // Empresa suspendida: no entra aunque el PIN sea correcto.
+  if (match.company_active === false) {
+    res.status(401).json({ error: 'Empresa suspendida, contactá al encargado' });
     return;
   }
 

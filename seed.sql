@@ -5,7 +5,7 @@
 -- desde el panel (el admin cambia su propio PIN y el de cada chofer).
 
 -- Empresa inicial
-INSERT INTO companies (name, code) SELECT 'Mis Taxis', 'MISTAX'
+INSERT INTO companies (name, code, payment_status) SELECT 'Mis Taxis', 'MISTAX', 'paid'
 WHERE NOT EXISTS (SELECT 1 FROM companies WHERE code = 'MISTAX');
 
 -- Taxi de prueba

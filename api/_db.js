@@ -92,11 +92,12 @@ async function requireAuth(req, res, roles) {
     return null;
   }
   const result = await getPool().query(
-    'SELECT id, name, role, phone, taxi_id, commission_pct, company_id, active FROM users WHERE id = $1',
+    'SELECT u.id, u.name, u.role, u.phone, u.taxi_id, u.commission_pct, u.company_id, u.active, c.active AS company_active FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = $1',
     [payload.userId]
   );
   const row = result.rows[0];
-  if (!row || !row.active) {
+  // Empresa suspendida: el usuario no opera más (ni siquiera con un token viejo).
+  if (!row || !row.active || row.company_active === false) {
     res.status(401).json({ error: 'No autorizado' });
     return null;
   }

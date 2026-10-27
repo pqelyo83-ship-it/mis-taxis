@@ -4,6 +4,8 @@
 //   GET /api/company?list=1   — lista pública de empresas activas (pantalla de ingreso).
 //   GET /api/company?panel=1  — lista de empresas con su dueño (solo superadmin).
 //   POST /api/company         — alta de empresa + dueño con email y PIN (solo superadmin).
+//   PUT /api/company?panel=1&id= — editar empresa/dueño, suspender/reactivar, pago (solo superadmin, nunca la propia).
+//   DELETE /api/company?panel=1&id= — borrar empresa y todos sus datos (solo superadmin, nunca la propia).
 //   GET /api/company          — datos de la empresa (solo admin).
 //   PUT /api/company          — nombre y horario de noche (solo admin).
 // El horario de noche define qué viajes se preseleccionan como nocturnos
@@ -97,6 +99,121 @@ module.exports = async function handler(req, res) {
   const user = await requireAuth(req, res, ['admin']);
   if (!user) return;
 
+  // Editar empresa/dueño desde el panel (solo superadmin, nunca la propia).
+  // Body parcial: { name, owner_name, owner_email, pin (vacío = no cambia),
+  //   active, payment_status ('paid' | 'pending') }.
+  if (req.method === 'PUT' && req.query && req.query.panel === '1') {
+    if (!user.is_superadmin) {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    const targetId = req.query.id ? Number(req.query.id) : null;
+    if (!targetId || targetId === user.company_id) {
+      res.status(403).json({ error: 'No podés modificar tu propia empresa desde acá' });
+      return;
+    }
+    const company = await pool.query('SELECT id FROM companies WHERE id = $1', [targetId]);
+    if (!company.rows[0]) {
+      res.status(404).json({ error: 'Empresa no encontrada' });
+      return;
+    }
+    const owner = await pool.query("SELECT id FROM users WHERE company_id = $1 AND role = 'admin' ORDER BY id LIMIT 1", [targetId]);
+    if (!owner.rows[0]) {
+      res.status(404).json({ error: 'Dueño no encontrado' });
+      return;
+    }
+    const ownerId = owner.rows[0].id;
+    const body = readBody(req);
+    if (body.name !== undefined) {
+      const name = String(body.name || '').trim();
+      if (!name) {
+        res.status(400).json({ error: 'Falta el nombre de la empresa' });
+        return;
+      }
+      await pool.query('UPDATE companies SET name = $1 WHERE id = $2', [name, targetId]);
+    }
+    if (body.active !== undefined) {
+      await pool.query('UPDATE companies SET active = $1 WHERE id = $2', [body.active !== false, targetId]);
+    }
+    if (body.payment_status !== undefined) {
+      if (body.payment_status !== 'paid' && body.payment_status !== 'pending') {
+        res.status(400).json({ error: 'Estado de pago inválido' });
+        return;
+      }
+      await pool.query('UPDATE companies SET payment_status = $1 WHERE id = $2', [body.payment_status, targetId]);
+    }
+    if (body.owner_name !== undefined) {
+      const ownerName = String(body.owner_name || '').trim();
+      if (!ownerName) {
+        res.status(400).json({ error: 'Falta el nombre del dueño' });
+        return;
+      }
+      await pool.query('UPDATE users SET name = $1 WHERE id = $2', [ownerName, ownerId]);
+    }
+    if (body.owner_email !== undefined) {
+      const ownerEmail = String(body.owner_email || '').trim().toLowerCase();
+      if (!ownerEmail || ownerEmail.indexOf('@') === -1) {
+        res.status(400).json({ error: 'Email inválido' });
+        return;
+      }
+      const taken = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1 AND id <> $2', [ownerEmail, ownerId]);
+      if (taken.rows[0]) {
+        res.status(400).json({ error: 'Ese email ya está en uso' });
+        return;
+      }
+      await pool.query('UPDATE users SET email = $1 WHERE id = $2', [ownerEmail, ownerId]);
+    }
+    if (body.pin !== undefined && body.pin !== '') {
+      const pin = String(body.pin || '');
+      if (pin.length < 4) {
+        res.status(400).json({ error: 'El PIN debe tener mínimo 4 caracteres' });
+        return;
+      }
+      const salt = newSalt();
+      await pool.query('UPDATE users SET pin_hash = $1, pin_salt = $2 WHERE id = $3', [hashPin(pin, salt), salt, ownerId]);
+    }
+    res.status(200).json({ ok: true });
+    return;
+  }
+
+  // Borrar empresa y TODOS sus datos (solo superadmin, nunca la propia).
+  // Irreversible: el frontend pide confirmación antes de llamar.
+  if (req.method === 'DELETE' && req.query && req.query.panel === '1') {
+    if (!user.is_superadmin) {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    const targetId = req.query.id ? Number(req.query.id) : null;
+    if (!targetId || targetId === user.company_id) {
+      res.status(403).json({ error: 'No podés borrar tu propia empresa' });
+      return;
+    }
+    const company = await pool.query('SELECT id FROM companies WHERE id = $1', [targetId]);
+    if (!company.rows[0]) {
+      res.status(404).json({ error: 'Empresa no encontrada' });
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM trips WHERE company_id = $1', [targetId]);
+      await client.query('DELETE FROM expenses WHERE company_id = $1', [targetId]);
+      await client.query('DELETE FROM day_shifts WHERE company_id = $1', [targetId]);
+      await client.query('DELETE FROM payment_methods WHERE company_id = $1', [targetId]);
+      await client.query('DELETE FROM users WHERE company_id = $1', [targetId]);
+      await client.query('DELETE FROM taxis WHERE company_id = $1', [targetId]);
+      await client.query('DELETE FROM companies WHERE id = $1', [targetId]);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    res.status(200).json({ ok: true });
+    return;
+  }
+
   // Panel Empresas (solo superadmin): todas las empresas con su dueño.
   if (req.method === 'GET' && req.query && req.query.panel === '1') {
     if (!user.is_superadmin) {
@@ -104,7 +221,7 @@ module.exports = async function handler(req, res) {
       return;
     }
     const result = await pool.query(
-      `SELECT c.id, c.name, c.code, c.active, c.created_at,
+      `SELECT c.id, c.name, c.code, c.active, c.payment_status, c.created_at,
         (SELECT name FROM users u WHERE u.company_id = c.id AND u.role IN ('admin', 'superadmin') ORDER BY u.id LIMIT 1) AS owner_name,
         (SELECT email FROM users u WHERE u.company_id = c.id AND u.role IN ('admin', 'superadmin') ORDER BY u.id LIMIT 1) AS owner_email
        FROM companies c ORDER BY c.created_at DESC`

@@ -1063,12 +1063,22 @@
     var origin = window.location.origin;
     var rows = companies.map(function (c) {
       var link = origin + '/?company=' + esc(c.code) + '&login=owner';
+      var isOwn = user.company_id === c.id;
+      var actions = isOwn
+        ? '<p class="muted">Tu empresa (se administra desde tu link de dueño principal).</p>'
+        : '<p><button type="button" class="small" data-edit-company="' + c.id + '">Editar</button> ' +
+          '<button type="button" class="small" data-toggle-active="' + c.id + '" data-active="' + (c.active ? '0' : '1') + '">' + (c.active ? 'Suspender' : 'Reactivar') + '</button> ' +
+          '<button type="button" class="small" data-toggle-paid="' + c.id + '" data-paid="' + (c.payment_status === 'paid' ? 'pending' : 'paid') + '">' + (c.payment_status === 'paid' ? 'Marcar pago pendiente' : 'Marcar pago al día') + '</button> ' +
+          '<button type="button" class="danger small" data-del-company="' + c.id + '">Borrar</button></p>' +
+          '<div data-edit-form="' + c.id + '"></div>';
       return '<div class="card"><p><strong>' + esc(c.name) + '</strong> · Código: ' + esc(c.code) +
-        ' · Dueño: ' + esc(c.owner_name || '—') + (c.owner_email ? ' (' + esc(c.owner_email) + ')' : '') +
-        ' · Link: <a href="' + link + '">' + link + '</a></p></div>';
+        (isOwn ? ' · Tu empresa' : '') + '</p>' +
+        '<p>Dueño: ' + esc(c.owner_name || '—') + (c.owner_email ? ' (' + esc(c.owner_email) + ')' : '') + '</p>' +
+        '<p>Estado: ' + (c.active ? 'Activa' : 'Suspendida') + ' · Pago: ' + (c.payment_status === 'paid' ? 'Al día' : 'Pendiente') + '</p>' +
+        '<p>Link: <a href="' + link + '">' + link + '</a></p>' + actions + '</div>';
     }).join('');
     contentEl.innerHTML = '<h2>Empresas</h2>' +
-      '<p class="muted">Solo vos ves este panel. Acá das de alta a los dueños: les creás su empresa con email y PIN y les pasás su link.</p>' +
+      '<p class="muted">Solo vos ves este panel. Acá das de alta a los dueños y los manejás según su pago: podés suspender a quien no pagó (deja de poder entrar) y reactivarlo cuando pague. Borrar elimina la empresa y todos sus datos y no se puede deshacer.</p>' +
       (rows || '<p class="muted">Todavía no hay empresas.</p>') +
       '<h3>Dar de alta una empresa</h3>' +
       '<form id="empresa-form">' +
@@ -1091,6 +1101,59 @@
         showMessage('Empresa creada: ' + result.company.name + ' — código ' + result.company.code + '. Link para el dueño: ' + ownerLink + ' — pasale ese link con su email y PIN.', 'ok');
         renderTab();
       } catch (e) { showMessage(e.message, 'error'); }
+    });
+    contentEl.querySelectorAll('[data-toggle-active]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        try {
+          await api('/api/company?panel=1&id=' + btn.getAttribute('data-toggle-active'), 'PUT', { active: btn.getAttribute('data-active') === '1' });
+          showMessage(btn.getAttribute('data-active') === '1' ? 'Empresa reactivada.' : 'Empresa suspendida: sus usuarios ya no pueden entrar.', 'ok');
+          renderTab();
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
+    contentEl.querySelectorAll('[data-toggle-paid]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        try {
+          await api('/api/company?panel=1&id=' + btn.getAttribute('data-toggle-paid'), 'PUT', { payment_status: btn.getAttribute('data-paid') });
+          showMessage('Estado de pago actualizado.', 'ok');
+          renderTab();
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
+    contentEl.querySelectorAll('[data-del-company]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var c = companies.find(function (x) { return String(x.id) === btn.getAttribute('data-del-company'); });
+        if (!window.confirm('¿Borrar la empresa "' + (c ? c.name : '') + '" y TODOS sus datos (choferes, viajes, gastos)? No se puede deshacer.')) return;
+        try {
+          await api('/api/company?panel=1&id=' + btn.getAttribute('data-del-company'), 'DELETE');
+          showMessage('Empresa borrada.', 'ok');
+          renderTab();
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
+    contentEl.querySelectorAll('[data-edit-company]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var c = companies.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-company'); });
+        var holder = contentEl.querySelector('[data-edit-form="' + c.id + '"]');
+        holder.innerHTML = '<form class="row">' +
+          '<label>Nombre de la empresa <input name="name" type="text" value="' + esc(c.name) + '" required></label>' +
+          '<label>Nombre del dueño <input name="owner_name" type="text" value="' + esc(c.owner_name || '') + '" required></label>' +
+          '<label>Email del dueño <input name="owner_email" type="email" value="' + esc(c.owner_email || '') + '" required></label>' +
+          '<label>PIN nuevo (vacío = no cambia) <input name="pin" type="password" inputmode="numeric"></label>' +
+          '<button type="submit">Guardar cambios</button> <button type="button" data-cancel-edit>Cancelar</button></form>';
+        var f = holder.querySelector('form');
+        f.addEventListener('submit', async function (ev) {
+          ev.preventDefault();
+          var body = { name: f.name.value, owner_name: f.owner_name.value, owner_email: f.owner_email.value };
+          if (f.pin.value) body.pin = f.pin.value;
+          try {
+            await api('/api/company?panel=1&id=' + c.id, 'PUT', body);
+            showMessage('Empresa actualizada.', 'ok');
+            renderTab();
+          } catch (e) { showMessage(e.message, 'error'); }
+        });
+        holder.querySelector('[data-cancel-edit]').addEventListener('click', function () { renderTab(); });
+      });
     });
   }
 
