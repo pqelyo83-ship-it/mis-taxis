@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mis Taxis</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>Mis Taxis</h1>
+  <div id="user-bar" class="hidden">
+    <span id="user-name"></span>
+    <button id="logout-btn" type="button">Salir</button>
+  </div>
+</header>
+
+<main>
+  <section id="login-view">
+    <h2>Ingresar con PIN</h2>
+    <p>Escribí tu PIN para entrar. No hace falta email ni contraseña.</p>
+    <form id="login-form">
+      <label for="pin-input">PIN</label>
+      <input id="pin-input" type="password" inputmode="numeric" autocomplete="off" placeholder="Tu PIN" required>
+      <button type="submit">Entrar</button>
+    </form>
+    <p id="login-error" class="error hidden"></p>
+  </section>
+
+  <section id="app-view" class="hidden">
+    <nav id="tabs"></nav>
+    <div id="message"></div>
+    <div id="content"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

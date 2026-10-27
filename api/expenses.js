@@ -1,0 +1,94 @@
+// /api/expenses — gastos del chofer (gasolina, arreglos, otros).
+// Los gastos se descuentan de la parte del dueño, no de la del chofer.
+// GET: admin ve todos; chofer ve solo los suyos.
+// POST: chofer crea solo gastos propios; admin puede crear para cualquier chofer.
+// DELETE: el dueño del gasto o el admin.
+
+const { getPool, requireAuth, readBody, toNumber, methodNotAllowed } = require('./_db');
+
+function dateStr(value) {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function publicExpense(row) {
+  return {
+    id: row.id,
+    driver_id: row.driver_id,
+    driver_name: row.driver_name || null,
+    expense_date: dateStr(row.expense_date),
+    type: row.type,
+    amount: row.amount,
+    note: row.note,
+    created_at: row.created_at,
+  };
+}
+
+const TYPES = ['gasolina', 'arreglos', 'otros'];
+
+module.exports = async function handler(req, res) {
+  const user = await requireAuth(req, res, ['admin', 'driver']);
+  if (!user) return;
+  const pool = getPool();
+  const id = req.query && req.query.id ? Number(req.query.id) : null;
+
+  if (req.method === 'GET') {
+    let result;
+    if (user.role === 'admin') {
+      result = await pool.query(
+        `SELECT e.*, u.name AS driver_name FROM expenses e
+         JOIN users u ON u.id = e.driver_id ORDER BY e.expense_date DESC, e.id DESC`
+      );
+    } else {
+      result = await pool.query(
+        'SELECT * FROM expenses WHERE driver_id = $1 ORDER BY expense_date DESC, id DESC',
+        [user.id]
+      );
+    }
+    res.status(200).json(result.rows.map(publicExpense));
+    return;
+  }
+
+  const body = readBody(req);
+
+  if (req.method === 'POST') {
+    const driverId = user.role === 'admin' && body.driver_id ? Number(body.driver_id) : user.id;
+    const amount = toNumber(body.amount, NaN);
+    if (!body.expense_date || TYPES.indexOf(body.type) === -1 || !Number.isFinite(amount) || amount < 0) {
+      res.status(400).json({ error: 'Datos del gasto inválidos (fecha, tipo y monto)' });
+      return;
+    }
+    const driver = await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
+    if (!driver.rows[0]) {
+      res.status(400).json({ error: 'Chofer inválido' });
+      return;
+    }
+    const result = await pool.query(
+      'INSERT INTO expenses (driver_id, expense_date, type, amount, note) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [driverId, body.expense_date, body.type, amount, String(body.note || '')]
+    );
+    res.status(201).json(publicExpense(result.rows[0]));
+    return;
+  }
+
+  if (req.method === 'DELETE') {
+    if (!id) {
+      res.status(400).json({ error: 'Falta id' });
+      return;
+    }
+    const current = await pool.query('SELECT * FROM expenses WHERE id = $1', [id]);
+    if (!current.rows[0]) {
+      res.status(404).json({ error: 'Gasto no encontrado' });
+      return;
+    }
+    if (user.role === 'driver' && current.rows[0].driver_id !== user.id) {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    await pool.query('DELETE FROM expenses WHERE id = $1', [id]);
+    res.status(200).json({ ok: true });
+    return;
+  }
+
+  return methodNotAllowed(res);
+};
