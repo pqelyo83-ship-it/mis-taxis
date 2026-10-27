@@ -170,11 +170,20 @@
     loginView.classList.add('hidden');
     appView.classList.remove('hidden');
     userBar.classList.remove('hidden');
+    var params = new URLSearchParams(window.location.search);
+    // Vista del encargado de la app (?panel=empresas): solo dueños y links,
+    // sin pestañas operativas (reportes, viajes, choferes, etc.).
+    if (user.is_superadmin && params.get('panel') === 'empresas') {
+      userNameEl.textContent = user.name + ' · dueño de la app';
+      tabsEl.innerHTML = '';
+      currentTab = 'empresas';
+      renderTab();
+      return;
+    }
     userNameEl.textContent = user.name + (user.role === 'admin' ? ' (admin)' : '') +
       (user.company_name ? ' · ' + user.company_name : '') +
       (user.is_superadmin ? ' · dueño de la app' : '');
     if (!currentTab) {
-      var params = new URLSearchParams(window.location.search);
       if (params.get('panel') === 'empresas' && user.is_superadmin) currentTab = 'empresas';
     }
     buildTabs();
