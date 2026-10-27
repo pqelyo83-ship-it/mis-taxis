@@ -36,6 +36,14 @@
     return d.getFullYear() + '-' + m + '-' + day;
   }
 
+  function daysAgoLocal(n) {
+    var d = new Date();
+    d.setDate(d.getDate() - n);
+    var m = String(d.getMonth() + 1).padStart(2, '0');
+    var day = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + m + '-' + day;
+  }
+
   function showMessage(text, kind) {
     messageEl.textContent = text || '';
     messageEl.className = kind || '';
@@ -114,6 +122,7 @@
 
   function adminTabs() {
     return [
+      { id: 'report', label: 'Reportes' },
       { id: 'closes', label: 'Cierres' },
       { id: 'taxis', label: 'Taxis' },
       { id: 'drivers', label: 'Choferes' },
@@ -147,6 +156,7 @@
       'expenses': renderExpenses,
       'close': renderMyClose,
       'closes': renderAllCloses,
+      'report': renderReport,
       'taxis': renderTaxis,
       'drivers': renderDrivers,
       'pin': renderPin,
@@ -433,6 +443,72 @@
         } catch (e) { showMessage(e.message, 'error'); }
       });
     });
+  }
+
+  // ---------- Reportes (admin) ----------
+
+  async function renderReport() {
+    var drivers = [];
+    var taxis = [];
+    try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+    try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
+    var driverOptions = '<option value="">Todos los choferes</option>' + drivers.map(function (d) {
+      return '<option value="' + d.id + '">' + esc(d.name) + '</option>';
+    }).join('');
+    var taxiOptions = '<option value="">Todos los autos</option>' + taxis.map(function (t) {
+      return '<option value="' + t.id + '">' + esc(t.identifier) + '</option>';
+    }).join('');
+    contentEl.innerHTML = '<h2>Reportes</h2><form id="report-form" class="row">' +
+      '<label>Desde <input name="from" type="date" value="' + daysAgoLocal(30) + '" required></label>' +
+      '<label>Hasta <input name="to" type="date" value="' + todayLocal() + '" required></label>' +
+      '<label>Chofer <select name="driver_id">' + driverOptions + '</select></label>' +
+      '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
+      '<button type="submit">Buscar</button></form><div id="report-result"></div>';
+    var form = document.getElementById('report-form');
+    var result = document.getElementById('report-result');
+
+    function perKmCell(v) {
+      return v !== null && v !== undefined ? money(v) + '/km' : '—';
+    }
+    function dayRows(rows) {
+      if (!rows.length) return '<p class="muted">Sin datos en ese período.</p>';
+      return '<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Viajes</th><th>Recaudado</th><th>Km</th><th>$/km</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + (r.km !== null ? esc(r.km) + ' km' : '—') + '</td><td>' + perKmCell(r.per_km) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    function breakdownRows(rows, nameFn) {
+      if (!rows.length) return '';
+      return '<div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Viajes</th><th>Recaudado</th><th>Km</th><th>$/km</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td>' + esc(nameFn(r)) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + (r.km !== null ? esc(r.km) + ' km' : '—') + '</td><td>' + perKmCell(r.per_km) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    async function search() {
+      var q = 'from=' + encodeURIComponent(form.from.value) + '&to=' + encodeURIComponent(form.to.value);
+      if (form.driver_id.value) q += '&driver_id=' + encodeURIComponent(form.driver_id.value);
+      if (form.taxi_id.value) q += '&taxi_id=' + encodeURIComponent(form.taxi_id.value);
+      result.innerHTML = '<p class="muted">Buscando…</p>';
+      try {
+        var rep = await api('/api/report?' + q);
+        var t = rep.totals;
+        var html = '<div class="card"><h3>' + esc(rep.from) + ' al ' + esc(rep.to) + '</h3>' +
+          '<p>Total recaudado</p><p class="big-number">' + money(t.total) + '</p>' +
+          '<p>Viajes: ' + esc(t.trips_count) + ' · Km recorridos: ' + esc(t.km) + ' km</p>' +
+          '<p>Dinero por km (promedio): <strong>' + perKmCell(t.avg_per_km) + '</strong></p>' +
+          '<p>Se quedan los choferes: ' + money(t.driver_keeps) + ' · Gastos: ' + money(t.expenses) + ' · Deben entregar: <strong>' + money(t.handover_to_owner) + '</strong></p>' +
+          '<p class="muted">El $/km se calcula solo sobre días con kilometraje cargado (jornada cerrada). Los días sin jornada no entran en el promedio.' +
+          (form.taxi_id.value ? ' Gastos asignados al auto según el taxi del día de cada gasto.' : '') + '</p></div>' +
+          '<h3>Por día</h3>' + dayRows(rep.per_day);
+        if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; });
+        if (!form.taxi_id.value) html += '<h3>Por auto</h3>' + breakdownRows(rep.per_taxi, function (r) { return r.taxi_identifier; });
+        result.innerHTML = html;
+      } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
+    }
+
+    form.addEventListener('submit', function (ev) { ev.preventDefault(); search(); });
+    search();
   }
 
   // ---------- Cierre del día ----------
