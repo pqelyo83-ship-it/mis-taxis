@@ -108,13 +108,14 @@
     loginView.classList.remove('hidden');
     appView.classList.add('hidden');
     userBar.classList.add('hidden');
-    // El link de un dueño (?login=owner) abre la misma pantalla de siempre
-    // pero con el ingreso de dueños ya desplegado.
+    // El link de un dueño (?login=owner) muestra SOLO el ingreso con email
+    // y PIN: no se carga ni se muestra la lista de empresas, así el dueño
+    // no ve los nombres de las otras empresas.
     var params = new URLSearchParams(window.location.search);
-    if (params.get('login') === 'owner') {
-      document.getElementById('owner-login-form').classList.remove('hidden');
-    }
-    loadCompanies();
+    var ownerOnly = params.get('login') === 'owner';
+    document.getElementById('pin-login-block').classList.toggle('hidden', ownerOnly);
+    document.getElementById('owner-login-block').classList.toggle('hidden', !ownerOnly);
+    if (!ownerOnly) loadCompanies();
   }
 
   // Empresas para la pantalla de ingreso. Si hay una sola, se elige sola;
@@ -1185,11 +1186,10 @@
     }
   });
 
-  // Registro de empresa nueva (venta a otros dueños).
-  // Ingreso de dueños con email y contraseña (los dueños creados desde
-  // el panel Empresas no tienen PIN).
+  // Ingreso de dueños con email y PIN (los dueños creados desde
+  // el panel Empresas entran con email + PIN, no con nombre + PIN).
   document.getElementById('show-owner-login-btn').addEventListener('click', function () {
-    document.getElementById('owner-login-form').classList.toggle('hidden');
+    document.getElementById('owner-login-block').classList.toggle('hidden');
     document.getElementById('owner-login-error').classList.add('hidden');
   });
 
