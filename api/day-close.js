@@ -52,6 +52,27 @@ module.exports = async function handler(req, res) {
     const kmDriven = sh && sh.entry_km !== null && sh.exit_km !== null
       ? round2(Number(sh.exit_km) - Number(sh.entry_km))
       : null;
+    // Alerta de km (solo para el admin): si el taxi abrió el día con más de
+    // 3 km por encima de su último cierre, el dueño lo ve en Cierres. Se
+    // calcula al leer (sin columna nueva): el cierre anterior es el último
+    // cierre de ese taxi antes de esta jornada (por fecha y luego por id).
+    let kmAlert = false;
+    let kmOver = null;
+    let prevExitKm = null;
+    if (user.role === 'admin' && sh && sh.taxi_id && sh.entry_km !== null) {
+      const prev = await pool.query(
+        `SELECT exit_km FROM day_shifts
+         WHERE company_id = $1 AND taxi_id = $2 AND exit_km IS NOT NULL AND id <> $3
+           AND (shift_date < $4 OR (shift_date = $4 AND id < $3))
+         ORDER BY shift_date DESC, id DESC LIMIT 1`,
+        [sh.company_id, sh.taxi_id, sh.id, date]
+      );
+      if (prev.rows[0]) {
+        prevExitKm = Number(prev.rows[0].exit_km);
+        kmOver = round2(Number(sh.entry_km) - prevExitKm);
+        kmAlert = kmOver > 3;
+      }
+    }
     closes.push({
       driver_id: driver.id,
       driver_name: driver.name,
@@ -68,6 +89,9 @@ module.exports = async function handler(req, res) {
       shift_exit_time: sh ? sh.exit_time : null,
       shift_exit_km: sh ? sh.exit_km : null,
       km_driven: kmDriven,
+      km_alert: kmAlert,
+      km_over: kmAlert ? kmOver : null,
+      prev_exit_km: prevExitKm,
     });
   }
 

@@ -118,7 +118,6 @@
     document.getElementById('fixed-user-name').classList.add('hidden');
     document.querySelector('label[for="user-select"]').classList.remove('hidden');
     document.getElementById('user-select').classList.remove('hidden');
-    document.getElementById('owner-login-btn-row').classList.remove('hidden');
     document.getElementById('pin-login-intro').textContent = 'Elegí tu nombre y escribí tu PIN (dueños y choferes entran igual).';
     // El link de un dueño (?login=owner) muestra SOLO el ingreso con email
     // y PIN: no se carga ni se muestra la lista de empresas, así el dueño
@@ -225,7 +224,6 @@
       document.getElementById('fixed-company-name').classList.add('hidden');
       document.querySelector('label[for="user-select"]').classList.add('hidden');
       document.getElementById('user-select').classList.add('hidden');
-      document.getElementById('owner-login-btn-row').classList.add('hidden');
       var fixedUserEl = document.getElementById('fixed-user-name');
       fixedUserEl.innerHTML = 'Usuario: <strong>' + esc(u.name) + '</strong>';
       fixedUserEl.classList.remove('hidden');
@@ -851,7 +849,7 @@
 
   // ---------- Cierre del día ----------
 
-  function closeCardsHtml(closes) {
+  function closeCardsHtml(closes, showKmAlert) {
     return closes.map(function (c) {
       var shiftLine = c.shift_taxi
         ? '<p>Taxi del día: ' + esc(c.shift_taxi) +
@@ -861,6 +859,7 @@
         : '<p class="muted">Sin jornada cargada para ese día.</p>';
       return '<div class="card"><h3>' + esc(c.driver_name) + ' · ' + esc(c.date) + '</h3>' +
         '<p>Viajes: ' + esc(c.trips_count) + '</p>' + shiftLine +
+        (showKmAlert && c.km_alert ? '<p class="error">⚠ Alerta de km: este taxi abrió el día ' + esc(c.km_over) + ' km por encima de su último cierre (' + esc(c.prev_exit_km) + ' km).</p>' : '') +
         '<p>Total recaudado</p><p class="big-number">' + money(c.total_collected) + '</p>' +
         '<p>Te quedás / Se queda el chofer: <strong>' + money(c.driver_keeps) + '</strong></p>' +
         '<p>Gastos del día: ' + money(c.expenses) + '</p>' +
@@ -914,7 +913,9 @@
     async function load() {
       try {
         var closes = await api('/api/day-close?date=' + encodeURIComponent(form.date.value));
-        result.innerHTML = closes.length ? closeCardsHtml(closes) : '<p class="muted">Sin datos para esa fecha.</p>';
+        var alerts = closes.filter(function (c) { return c.km_alert; }).length;
+        var banner = alerts ? '<p class="error">⚠ Alerta de km: ' + alerts + ' jornada(s) abrieron con más de 3 km por encima del último cierre de su taxi.</p>' : '';
+        result.innerHTML = banner + (closes.length ? closeCardsHtml(closes, true) : '<p class="muted">Sin datos para esa fecha.</p>');
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
     }
     form.addEventListener('submit', function (ev) { ev.preventDefault(); load(); });
@@ -1348,12 +1349,9 @@
     }
   });
 
-  // Ingreso de dueños con email y PIN (los dueños creados desde
-  // el panel Empresas entran con email + PIN, no con nombre + PIN).
-  document.getElementById('show-owner-login-btn').addEventListener('click', function () {
-    document.getElementById('owner-login-block').classList.toggle('hidden');
-    document.getElementById('owner-login-error').classList.add('hidden');
-  });
+  // Sin botón para el ingreso con email y PIN en la pantalla principal: los
+  // dueños entran con nombre + PIN (aparecen con "(admin)" en la lista). El
+  // formulario de email y PIN sigue disponible con el link ?login=owner.
 
   document.getElementById('owner-login-form').addEventListener('submit', async function (ev) {
     ev.preventDefault();
