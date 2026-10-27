@@ -68,7 +68,7 @@ async function requireAuth(req, res, roles) {
     return null;
   }
   const result = await getPool().query(
-    'SELECT id, name, role, phone, taxi_id, commission_pct, active FROM users WHERE id = $1',
+    'SELECT id, name, role, phone, taxi_id, commission_pct, company_id, active FROM users WHERE id = $1',
     [payload.userId]
   );
   const user = result.rows[0];

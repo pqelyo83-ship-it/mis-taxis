@@ -44,30 +44,30 @@ module.exports = async function handler(req, res) {
   const driverId = req.query.driver_id ? Number(req.query.driver_id) : null;
   const taxiId = req.query.taxi_id ? Number(req.query.taxi_id) : null;
 
-  // Condiciones para viajes (por fecha de viaje).
-  const tripCond = ['trip_date BETWEEN $1 AND $2'];
-  const tripParams = [from, to];
-  if (driverId) { tripParams.push(driverId); tripCond.push('driver_id = $' + tripParams.length); }
-  if (taxiId) { tripParams.push(taxiId); tripCond.push('taxi_id = $' + tripParams.length); }
+  // Condiciones para viajes (por fecha de viaje). Siempre con empresa.
+  const tripCond = ['tr.company_id = $1', 'tr.trip_date BETWEEN $2 AND $3'];
+  const tripParams = [user.company_id, from, to];
+  if (driverId) { tripParams.push(driverId); tripCond.push('tr.driver_id = $' + tripParams.length); }
+  if (taxiId) { tripParams.push(taxiId); tripCond.push('tr.taxi_id = $' + tripParams.length); }
   const tripWhere = 'WHERE ' + tripCond.join(' AND ');
 
-  // Condiciones para jornadas (por fecha de jornada).
-  const shiftCond = ['shift_date BETWEEN $1 AND $2'];
-  const shiftParams = [from, to];
-  if (driverId) { shiftParams.push(driverId); shiftCond.push('driver_id = $' + shiftParams.length); }
-  if (taxiId) { shiftParams.push(taxiId); shiftCond.push('taxi_id = $' + shiftParams.length); }
+  // Condiciones para jornadas (por fecha de jornada). Siempre con empresa.
+  const shiftCond = ['s.company_id = $1', 's.shift_date BETWEEN $2 AND $3'];
+  const shiftParams = [user.company_id, from, to];
+  if (driverId) { shiftParams.push(driverId); shiftCond.push('s.driver_id = $' + shiftParams.length); }
+  if (taxiId) { shiftParams.push(taxiId); shiftCond.push('s.taxi_id = $' + shiftParams.length); }
   const shiftWhere = 'WHERE ' + shiftCond.join(' AND ');
 
   const tripsByDay = await pool.query(
-    `SELECT trip_date, COUNT(*) AS trips, COALESCE(SUM(amount), 0) AS total,
-            COALESCE(SUM(amount * pct_snapshot / 100), 0) AS keeps
-     FROM trips ${tripWhere} GROUP BY trip_date ORDER BY trip_date`,
+    `SELECT tr.trip_date, COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
+            COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps
+     FROM trips tr ${tripWhere} GROUP BY tr.trip_date ORDER BY tr.trip_date`,
     tripParams
   );
   const kmByDay = await pool.query(
-    `SELECT shift_date, COALESCE(SUM(exit_km - entry_km), 0) AS km
-     FROM day_shifts ${shiftWhere} AND exit_km IS NOT NULL
-     GROUP BY shift_date ORDER BY shift_date`,
+    `SELECT s.shift_date, COALESCE(SUM(s.exit_km - s.entry_km), 0) AS km
+     FROM day_shifts s ${shiftWhere} AND s.exit_km IS NOT NULL
+     GROUP BY s.shift_date ORDER BY s.shift_date`,
     shiftParams
   );
   const tripsByDriver = await pool.query(
@@ -78,9 +78,9 @@ module.exports = async function handler(req, res) {
     tripParams
   );
   const kmByDriver = await pool.query(
-    `SELECT driver_id, COALESCE(SUM(exit_km - entry_km), 0) AS km
-     FROM day_shifts ${shiftWhere} AND exit_km IS NOT NULL
-     GROUP BY driver_id`,
+    `SELECT s.driver_id, COALESCE(SUM(s.exit_km - s.entry_km), 0) AS km
+     FROM day_shifts s ${shiftWhere} AND s.exit_km IS NOT NULL
+     GROUP BY s.driver_id`,
     shiftParams
   );
   const tripsByTaxi = await pool.query(
@@ -91,15 +91,16 @@ module.exports = async function handler(req, res) {
     tripParams
   );
   const kmByTaxi = await pool.query(
-    `SELECT taxi_id, COALESCE(SUM(exit_km - entry_km), 0) AS km
-     FROM day_shifts ${shiftWhere} AND exit_km IS NOT NULL
-     GROUP BY taxi_id`,
+    `SELECT s.taxi_id, COALESCE(SUM(s.exit_km - s.entry_km), 0) AS km
+     FROM day_shifts s ${shiftWhere} AND s.exit_km IS NOT NULL
+     GROUP BY s.taxi_id`,
     shiftParams
   );
 
   // Gastos: filtro de chofer directo; filtro de taxi vía la jornada del día.
-  const expCond = ['e.expense_date BETWEEN $1 AND $2'];
-  const expParams = [from, to];
+  // Siempre con empresa.
+  const expCond = ['e.company_id = $1', 'e.expense_date BETWEEN $2 AND $3'];
+  const expParams = [user.company_id, from, to];
   let expJoin = '';
   if (driverId) { expParams.push(driverId); expCond.push('e.driver_id = $' + expParams.length); }
   if (taxiId) {

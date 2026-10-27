@@ -12,10 +12,10 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'GET') {
     if (user.role === 'admin') {
-      const result = await pool.query('SELECT * FROM taxis ORDER BY identifier');
+      const result = await pool.query('SELECT * FROM taxis WHERE company_id = $1 ORDER BY identifier', [user.company_id]);
       res.status(200).json(result.rows);
     } else {
-      const result = await pool.query('SELECT * FROM taxis WHERE active = TRUE ORDER BY identifier');
+      const result = await pool.query('SELECT * FROM taxis WHERE active = TRUE AND company_id = $1 ORDER BY identifier', [user.company_id]);
       res.status(200).json(result.rows);
     }
     return;
@@ -36,8 +36,8 @@ module.exports = async function handler(req, res) {
       return;
     }
     const result = await pool.query(
-      'INSERT INTO taxis (identifier, plate, model, year, active) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [identifier, plate, String(body.model || ''), body.year ? Number(body.year) : null, body.active !== false]
+      'INSERT INTO taxis (company_id, identifier, plate, model, year, active) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [user.company_id, identifier, plate, String(body.model || ''), body.year ? Number(body.year) : null, body.active !== false]
     );
     res.status(201).json(result.rows[0]);
     return;
@@ -49,7 +49,7 @@ module.exports = async function handler(req, res) {
       return;
     }
     const result = await pool.query(
-      'UPDATE taxis SET identifier = $1, plate = $2, model = $3, year = $4, active = $5 WHERE id = $6 RETURNING *',
+      'UPDATE taxis SET identifier = $1, plate = $2, model = $3, year = $4, active = $5 WHERE id = $6 AND company_id = $7 RETURNING *',
       [
         String(body.identifier || '').trim(),
         String(body.plate || '').trim(),
@@ -57,6 +57,7 @@ module.exports = async function handler(req, res) {
         body.year ? Number(body.year) : null,
         body.active !== false,
         id,
+        user.company_id,
       ]
     );
     if (!result.rows[0]) {
@@ -72,7 +73,11 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Falta id' });
       return;
     }
-    await pool.query('DELETE FROM taxis WHERE id = $1', [id]);
+    const result = await pool.query('DELETE FROM taxis WHERE id = $1 AND company_id = $2', [id, user.company_id]);
+    if (result.rowCount === 0) {
+      res.status(404).json({ error: 'Taxi no encontrado' });
+      return;
+    }
     res.status(200).json({ ok: true });
     return;
   }

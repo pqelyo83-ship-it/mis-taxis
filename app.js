@@ -1,6 +1,8 @@
 // Mis Taxis — app de una sola página (JavaScript sin compilación).
-// Habla solo con estas rutas de la API: /api/auth, /api/taxis, /api/drivers,
-// /api/trips, /api/expenses, /api/day-close, /api/change-pin.
+// Habla solo con estas rutas de la API: /api/auth, /api/login-users,
+// /api/companies, /api/register, /api/company, /api/taxis, /api/drivers,
+// /api/trips, /api/expenses, /api/day-close, /api/change-pin, /api/report,
+// /api/shifts, /api/receipt.
 
 (function () {
   'use strict';
@@ -44,6 +46,40 @@
     return d.getFullYear() + '-' + m + '-' + day;
   }
 
+  function nowTimeLocal() {
+    var d = new Date();
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  // ¿Es hora de noche según el horario de la empresa? Soporta rangos que
+  // cruzan la medianoche (por ejemplo 22 a 6).
+  function isNightHour(hour, start, end) {
+    if (start === end) return false;
+    if (start < end) return hour >= start && hour < end;
+    return hour >= start || hour < end;
+  }
+
+  // Ubicación del teléfono (pide permiso al navegador). Si no hay permiso
+  // o no hay GPS, llama con null: la ubicación es opcional, nunca bloquea.
+  function captureLocation(cb) {
+    if (!navigator.geolocation) { cb(null); return; }
+    var done = false;
+    function finish(v) { if (!done) { done = true; cb(v); } }
+    try {
+      navigator.geolocation.getCurrentPosition(
+        function (pos) { finish({ lat: pos.coords.latitude, lng: pos.coords.longitude }); },
+        function () { finish(null); },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+      );
+      setTimeout(function () { finish(null); }, 9000);
+    } catch (e) { finish(null); }
+  }
+
+  function mapLink(lat, lng, label) {
+    if (lat === null || lat === undefined || lng === null || lng === undefined) return '';
+    return ' · <a href="https://maps.google.com/?q=' + encodeURIComponent(lat + ',' + lng) + '" target="_blank" rel="noopener">' + (label || 'Mapa') + '</a>';
+  }
+
   function showMessage(text, kind) {
     messageEl.textContent = text || '';
     messageEl.className = kind || '';
@@ -72,15 +108,46 @@
     loginView.classList.remove('hidden');
     appView.classList.add('hidden');
     userBar.classList.add('hidden');
-    loadLoginUsers();
+    loadCompanies();
   }
 
-  // Carga los nombres para la pantalla de ingreso (sin PINes ni hashes).
-  async function loadLoginUsers() {
-    var select = document.getElementById('user-select');
+  // Empresas para la pantalla de ingreso. Si hay una sola, se elige sola;
+  // ?company=CODIGO en la URL preselecciona esa empresa.
+  async function loadCompanies() {
+    var select = document.getElementById('company-select');
     if (!select) return;
     try {
-      var users = await api('/api/login-users');
+      var companies = await api('/api/companies');
+      if (!companies || !companies.length) {
+        select.innerHTML = '<option value="">Sin empresas</option>';
+        return;
+      }
+      select.innerHTML = companies.map(function (c) {
+        return '<option value="' + c.id + '">' + esc(c.name) + ' (' + esc(c.code) + ')</option>';
+      }).join('');
+      var params = new URLSearchParams(window.location.search);
+      var code = params.get('company');
+      if (code) {
+        var found = companies.find(function (c) { return c.code === code; });
+        if (found) select.value = found.id;
+      }
+      loadLoginUsers(select.value);
+    } catch (e) {
+      select.innerHTML = '<option value="">No se pudo cargar la lista</option>';
+    }
+  }
+
+  // Carga los nombres para la pantalla de ingreso (sin PINes ni hashes),
+  // solo de la empresa seleccionada.
+  async function loadLoginUsers(companyId) {
+    var select = document.getElementById('user-select');
+    if (!select) return;
+    if (!companyId) {
+      select.innerHTML = '<option value="">Elegí una empresa</option>';
+      return;
+    }
+    try {
+      var users = await api('/api/login-users?company_id=' + encodeURIComponent(companyId));
       if (!users || !users.length) {
         select.innerHTML = '<option value="">Sin usuarios activos</option>';
         return;
@@ -97,7 +164,8 @@
     loginView.classList.add('hidden');
     appView.classList.remove('hidden');
     userBar.classList.remove('hidden');
-    userNameEl.textContent = user.name + (user.role === 'admin' ? ' (admin)' : '');
+    userNameEl.textContent = user.name + (user.role === 'admin' ? ' (admin)' : '') +
+      (user.company_name ? ' · ' + user.company_name : '');
     buildTabs();
   }
 
@@ -128,6 +196,7 @@
       { id: 'drivers', label: 'Choferes' },
       { id: 'trips', label: 'Viajes' },
       { id: 'expenses', label: 'Gastos' },
+      { id: 'company', label: 'Mi empresa' },
       { id: 'pin', label: 'Mi PIN' },
     ];
   }
@@ -159,6 +228,7 @@
       'report': renderReport,
       'taxis': renderTaxis,
       'drivers': renderDrivers,
+      'company': renderCompany,
       'pin': renderPin,
     };
     var fn = renderers[currentTab];
@@ -191,47 +261,67 @@
         var shifts = await api('/api/shifts?date=' + encodeURIComponent(date));
         var s = shifts && shifts[0] ? shifts[0] : null;
         if (!s) {
-          // Sin jornada: entrada del día.
+          // Sin jornada: entrada del día. La hora se precarga con la actual
+          // y la ubicación se captura del teléfono (si da permiso).
+          var entryGeo = null;
           stateEl.innerHTML = '<form id="day-start-form" class="row">' + taxiSelect(user.taxi_id) +
-            '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
+            '<label>Hora de entrada <input name="entry_time" type="time" value="' + nowTimeLocal() + '" required></label>' +
             '<label>Km del auto <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
             '<button type="submit">Empezar día</button></form>' +
+            '<p class="muted" id="day-geo-status">Detectando ubicación…</p>' +
             '<p class="muted">Al entrar, cargá la hora y el kilometraje con el que agarrás el auto.</p>';
+          captureLocation(function (geo) {
+            entryGeo = geo;
+            var st = document.getElementById('day-geo-status');
+            if (st) st.textContent = geo ? 'Ubicación de entrada detectada.' : 'Sin ubicación (revisá los permisos del navegador).';
+          });
           document.getElementById('day-start-form').addEventListener('submit', async function (ev) {
             ev.preventDefault();
             var f = ev.target;
+            var body = {
+              shift_date: date,
+              taxi_id: f.taxi_id.value,
+              entry_time: f.entry_time.value,
+              entry_km: f.entry_km.value,
+              exit_time: null,
+              exit_km: null,
+            };
+            if (entryGeo) { body.entry_lat = entryGeo.lat; body.entry_lng = entryGeo.lng; }
             try {
-              await api('/api/shifts', 'POST', {
-                shift_date: date,
-                taxi_id: f.taxi_id.value,
-                entry_time: f.entry_time.value,
-                entry_km: f.entry_km.value,
-                exit_time: null,
-                exit_km: null,
-              });
+              await api('/api/shifts', 'POST', body);
               showMessage('Día empezado.', 'ok');
               load();
             } catch (e) { showMessage(e.message, 'error'); }
           });
         } else if (!s.exit_time && s.exit_km === null) {
-          // Jornada abierta: botón para cerrar el día.
-          stateEl.innerHTML = '<p>Taxi del día: <strong>' + esc(s.taxi_identifier || '—') + '</strong> · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km</p>' +
+          // Jornada abierta: botón para cerrar el día. Hora actual precargada
+          // y ubicación de salida del teléfono (si da permiso).
+          var exitGeo = null;
+          stateEl.innerHTML = '<p>Taxi del día: <strong>' + esc(s.taxi_identifier || '—') + '</strong> · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Ver entrada en mapa') + '</p>' +
             '<form id="day-close-form" class="row">' +
-            '<label>Hora de cierre <input name="exit_time" type="time" required></label>' +
+            '<label>Hora de cierre <input name="exit_time" type="time" value="' + nowTimeLocal() + '" required></label>' +
             '<label>Km con el que queda el auto <input name="exit_km" type="number" step="0.01" min="0" required></label>' +
-            '<button type="submit">Cerrar el día</button></form>';
+            '<button type="submit">Cerrar el día</button></form>' +
+            '<p class="muted" id="day-geo-status">Detectando ubicación…</p>';
+          captureLocation(function (geo) {
+            exitGeo = geo;
+            var st = document.getElementById('day-geo-status');
+            if (st) st.textContent = geo ? 'Ubicación de salida detectada.' : 'Sin ubicación (revisá los permisos del navegador).';
+          });
           document.getElementById('day-close-form').addEventListener('submit', async function (ev) {
             ev.preventDefault();
             var f = ev.target;
+            var body = {
+              shift_date: date,
+              taxi_id: s.taxi_id,
+              entry_time: s.entry_time,
+              entry_km: s.entry_km,
+              exit_time: f.exit_time.value,
+              exit_km: f.exit_km.value,
+            };
+            if (exitGeo) { body.exit_lat = exitGeo.lat; body.exit_lng = exitGeo.lng; }
             try {
-              await api('/api/shifts', 'POST', {
-                shift_date: date,
-                taxi_id: s.taxi_id,
-                entry_time: s.entry_time,
-                entry_km: s.entry_km,
-                exit_time: f.exit_time.value,
-                exit_km: f.exit_km.value,
-              });
+              await api('/api/shifts', 'POST', body);
               showMessage('Día cerrado.', 'ok');
               load();
             } catch (e) { showMessage(e.message, 'error'); }
@@ -244,7 +334,7 @@
           var exitLine = (s.exit_time ? ' · Cierre: ' + esc(s.exit_time) : '') +
             (s.exit_km !== null ? ' · ' + esc(s.exit_km) + ' km' : '');
           stateEl.innerHTML = '<p><strong>Día cerrado.</strong> Taxi: ' + esc(s.taxi_identifier || '—') +
-            ' · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + exitLine + kmLine + '</p>' +
+            ' · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Entrada en mapa') + exitLine + mapLink(s.exit_lat, s.exit_lng, 'Salida en mapa') + kmLine + '</p>' +
             (closes.length ? closeCardsHtml(closes) : '') +
             '<button type="button" id="day-edit-btn">Editar día</button>';
           document.getElementById('day-edit-btn').addEventListener('click', function () {
@@ -293,7 +383,7 @@
         ? '<p>Entrada: ' + esc(t.entry_time) + ' · ' + esc(t.entry_km) + ' km — Salida: ' + esc(t.exit_time) + ' · ' + esc(t.exit_km) + ' km</p>'
         : '';
       return '<div class="card"><p><strong>' + esc(t.trip_date) + '</strong> · ' + esc(t.driver_name || user.name) +
-        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + ' · Turno: ' + (t.shift_type === 'night' ? 'Noche' : 'Día') + '</p>' + shiftLine +
+        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + ' · Turno: ' + (t.shift_type === 'night' ? 'Noche' : 'Día') + mapLink(t.trip_lat, t.trip_lng, 'Mapa') + '</p>' + shiftLine +
         '<p>Monto: ' + money(t.amount) + ' · %: ' + esc(t.pct_snapshot) + '% · Te quedás: ' + money(t.driver_keeps) + ' · Dueño: ' + money(t.owner_share) + '</p>' +
         '<button type="button" class="secondary small" data-edit-trip="' + t.id + '">Editar</button> ' +
         '<button type="button" class="danger small" data-del-trip="' + t.id + '">Borrar</button></div>';
@@ -338,7 +428,9 @@
 
   function tripFormHtml() {
     var hour = new Date().getHours();
-    var nightDefault = hour >= 22 || hour < 6;
+    var nightStart = (user.night_start !== undefined && user.night_start !== null) ? user.night_start : 22;
+    var nightEnd = (user.night_end !== undefined && user.night_end !== null) ? user.night_end : 6;
+    var nightDefault = isNightHour(hour, nightStart, nightEnd);
     var pctNote = '';
     if (user.commission_day_pct !== undefined && user.commission_night_pct !== undefined) {
       pctNote = ' Tu %: día ' + esc(user.commission_day_pct) + '% · noche ' + esc(user.commission_night_pct) + '%.';
@@ -348,11 +440,18 @@
       '<label>Turno <select name="shift_type"><option value="day"' + (nightDefault ? '' : ' selected') + '>Día</option><option value="night"' + (nightDefault ? ' selected' : '') + '>Noche</option></select></label>' +
       '<label>Monto del viaje (USD) <input name="amount" type="number" step="0.01" min="0" required></label>' +
       '<button type="submit">Guardar viaje</button></form>' +
+      '<p class="muted" id="trip-geo-status">Detectando ubicación…</p>' +
       '<p class="muted">Solo el monto: la hora y el kilometraje van en "Mi día". El % que se aplica es el de tu turno (día o noche), puesto por el administrador.' + pctNote + ' Si cambia después, tus viajes viejos no cambian.</p>';
   }
 
   async function renderNewTrip() {
+    var tripGeo = null;
     contentEl.innerHTML = tripFormHtml();
+    captureLocation(function (geo) {
+      tripGeo = geo;
+      var st = document.getElementById('trip-geo-status');
+      if (st) st.textContent = geo ? 'Ubicación del viaje detectada.' : 'Sin ubicación (revisá los permisos del navegador).';
+    });
     document.getElementById('trip-form').addEventListener('submit', async function (ev) {
       ev.preventDefault();
       var f = ev.target;
@@ -361,6 +460,7 @@
         shift_type: f.shift_type.value,
         amount: f.amount.value,
       };
+      if (tripGeo) { body.trip_lat = tripGeo.lat; body.trip_lng = tripGeo.lng; }
       try {
         var created = await api('/api/trips', 'POST', body);
         showMessage('Viaje guardado. Te quedás ' + money(created.driver_keeps) + ' y al dueño le van ' + money(created.owner_share) + '.', 'ok');
@@ -828,15 +928,48 @@
     });
   }
 
+  // ---------- Mi empresa (solo admin) ----------
+
+  async function renderCompany() {
+    var company = await api('/api/company');
+    contentEl.innerHTML = '<h2>Mi empresa</h2>' +
+      '<p class="muted">Código de empresa: <strong>' + esc(company.code) + '</strong> — tus choferes la eligen con este código al ingresar (o con el enlace mis-taxis-ebon.vercel.app/?company=' + esc(company.code) + ').</p>' +
+      '<form id="company-form">' +
+      '<label>Nombre de la empresa <input name="name" type="text" value="' + esc(company.name) + '" required></label>' +
+      '<label>La noche empieza a las (hora 0-23) <input name="night_start" type="number" min="0" max="23" value="' + esc(company.night_start) + '" required></label>' +
+      '<label>La noche termina a las (hora 0-23) <input name="night_end" type="number" min="0" max="23" value="' + esc(company.night_end) + '" required></label>' +
+      '<button type="submit">Guardar empresa</button></form>' +
+      '<p class="muted">El horario de noche define qué viajes se preseleccionan como nocturnos en el celular del chofer; el chofer igual puede cambiar el turno por viaje.</p>';
+    document.getElementById('company-form').addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      var f = ev.target;
+      try {
+        await api('/api/company', 'PUT', {
+          name: f.name.value,
+          night_start: Number(f.night_start.value),
+          night_end: Number(f.night_end.value),
+        });
+        showMessage('Empresa guardada.', 'ok');
+        renderTab();
+      } catch (e) { showMessage(e.message, 'error'); }
+    });
+  }
+
   // ---------- Login ----------
+
+  document.getElementById('company-select').addEventListener('change', function (ev) {
+    loadLoginUsers(ev.target.value);
+  });
 
   document.getElementById('login-form').addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var pin = document.getElementById('pin-input').value;
     var userId = document.getElementById('user-select').value;
+    var companyId = document.getElementById('company-select').value;
     loginError.classList.add('hidden');
+    if (!companyId || !userId) return;
     try {
-      var data = await api('/api/auth', 'POST', { user_id: Number(userId), pin: pin });
+      var data = await api('/api/auth', 'POST', { user_id: Number(userId), company_id: Number(companyId), pin: pin });
       token = data.token;
       user = data.user;
       localStorage.setItem('mt_token', token);
@@ -847,6 +980,38 @@
     } catch (e) {
       loginError.textContent = e.message;
       loginError.classList.remove('hidden');
+    }
+  });
+
+  // Registro de empresa nueva (venta a otros dueños).
+  document.getElementById('show-register-btn').addEventListener('click', function () {
+    document.getElementById('register-form').classList.toggle('hidden');
+    document.getElementById('register-result').classList.add('hidden');
+  });
+
+  document.getElementById('register-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    var form = ev.target;
+    var resultEl = document.getElementById('register-result');
+    resultEl.classList.add('hidden');
+    try {
+      var result = await api('/api/register', 'POST', {
+        company_name: form.company_name.value,
+        admin_name: form.admin_name.value,
+        pin: form.pin.value,
+      });
+      resultEl.textContent = 'Empresa creada: ' + result.company.name + ' — código ' + result.company.code +
+        '. Ya podés ingresar con tu nombre y PIN.';
+      resultEl.classList.remove('hidden');
+      form.classList.add('hidden');
+      form.reset();
+      await loadCompanies();
+      var select = document.getElementById('company-select');
+      if (select) select.value = result.company.id;
+      loadLoginUsers(result.company.id);
+    } catch (e) {
+      resultEl.textContent = e.message;
+      resultEl.classList.remove('hidden');
     }
   });
 

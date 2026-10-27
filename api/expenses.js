@@ -38,12 +38,13 @@ module.exports = async function handler(req, res) {
     if (user.role === 'admin') {
       result = await pool.query(
         `SELECT e.*, u.name AS driver_name FROM expenses e
-         JOIN users u ON u.id = e.driver_id ORDER BY e.expense_date DESC, e.id DESC`
+         JOIN users u ON u.id = e.driver_id WHERE e.company_id = $1 ORDER BY e.expense_date DESC, e.id DESC`,
+        [user.company_id]
       );
     } else {
       result = await pool.query(
-        'SELECT * FROM expenses WHERE driver_id = $1 ORDER BY expense_date DESC, id DESC',
-        [user.id]
+        'SELECT * FROM expenses WHERE driver_id = $1 AND company_id = $2 ORDER BY expense_date DESC, id DESC',
+        [user.id, user.company_id]
       );
     }
     res.status(200).json(result.rows.map(publicExpense));
@@ -59,8 +60,8 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Datos del gasto inválidos (fecha, tipo y monto)' });
       return;
     }
-    const driver = await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
-    if (!driver.rows[0]) {
+    const driver = await pool.query("SELECT id, company_id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
+    if (!driver.rows[0] || driver.rows[0].company_id !== user.company_id) {
       res.status(400).json({ error: 'Chofer inválido' });
       return;
     }
@@ -72,8 +73,8 @@ module.exports = async function handler(req, res) {
       return;
     }
     const result = await pool.query(
-      'INSERT INTO expenses (driver_id, expense_date, type, amount, note, receipt_image) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [driverId, body.expense_date, body.type, amount, String(body.note || ''), receiptImage || null]
+      'INSERT INTO expenses (company_id, driver_id, expense_date, type, amount, note, receipt_image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [driver.rows[0].company_id, driverId, body.expense_date, body.type, amount, String(body.note || ''), receiptImage || null]
     );
     res.status(201).json(publicExpense(result.rows[0]));
     return;
@@ -87,6 +88,10 @@ module.exports = async function handler(req, res) {
     const current = await pool.query('SELECT * FROM expenses WHERE id = $1', [id]);
     if (!current.rows[0]) {
       res.status(404).json({ error: 'Gasto no encontrado' });
+      return;
+    }
+    if (current.rows[0].company_id !== user.company_id) {
+      res.status(403).json({ error: 'Sin permiso' });
       return;
     }
     if (user.role === 'driver' && current.rows[0].driver_id !== user.id) {

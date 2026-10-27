@@ -23,7 +23,7 @@ module.exports = async function handler(req, res) {
 
   let drivers;
   if (user.role === 'admin') {
-    const result = await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND active = TRUE ORDER BY name");
+    const result = await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND active = TRUE AND company_id = $1 ORDER BY name", [user.company_id]);
     drivers = result.rows;
   } else {
     drivers = [{ id: user.id, name: user.name }];

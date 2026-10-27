@@ -15,10 +15,14 @@ module.exports = async function handler(req, res) {
     return;
   }
   const pool = getPool();
-  const result = await pool.query('SELECT driver_id, receipt_image FROM expenses WHERE id = $1', [id]);
+  const result = await pool.query('SELECT driver_id, company_id, receipt_image FROM expenses WHERE id = $1', [id]);
   const row = result.rows[0];
   if (!row) {
     res.status(404).json({ error: 'Gasto no encontrado' });
+    return;
+  }
+  if (row.company_id !== user.company_id) {
+    res.status(403).json({ error: 'Sin permiso' });
     return;
   }
   if (user.role === 'driver' && row.driver_id !== user.id) {

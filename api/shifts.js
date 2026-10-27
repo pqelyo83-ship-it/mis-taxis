@@ -27,9 +27,32 @@ function withKm(row) {
     entry_km: row.entry_km,
     exit_time: row.exit_time,
     exit_km: row.exit_km,
+    entry_lat: row.entry_lat,
+    entry_lng: row.entry_lng,
+    exit_lat: row.exit_lat,
+    exit_lng: row.exit_lng,
     km_driven: km,
     created_at: row.created_at,
   };
+}
+
+function validLat(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= -90 && n <= 90 ? n : null;
+}
+
+function validLng(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= -180 && n <= 180 ? n : null;
+}
+
+function geoPair(latV, lngV) {
+  if (latV === undefined && lngV === undefined) return null;
+  const lat = validLat(latV);
+  const lng = validLng(lngV);
+  return lat !== null && lng !== null ? { lat, lng } : null;
 }
 
 const SELECT_SQL = `
@@ -47,6 +70,9 @@ module.exports = async function handler(req, res) {
   if (req.method === 'GET') {
     const conditions = [];
     const params = [];
+    // Aislamiento por empresa: siempre.
+    params.push(user.company_id);
+    conditions.push('s.company_id = $' + params.length);
     if (user.role === 'driver') {
       params.push(user.id);
       conditions.push('s.driver_id = $' + params.length);
@@ -67,8 +93,8 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return methodNotAllowed(res);
   const body = readBody(req);
   const driverId = user.role === 'admin' && body.driver_id ? Number(body.driver_id) : user.id;
-  const driver = await pool.query("SELECT id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
-  if (!driver.rows[0]) {
+  const driver = await pool.query("SELECT id, company_id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
+  if (!driver.rows[0] || driver.rows[0].company_id !== user.company_id) {
     res.status(400).json({ error: 'Chofer inválido' });
     return;
   }
@@ -83,15 +109,24 @@ module.exports = async function handler(req, res) {
     return;
   }
   const taxiId = body.taxi_id ? Number(body.taxi_id) : null;
+  // Ubicación opcional (el teléfono la comparte solo con permiso).
+  const entryGeo = geoPair(body.entry_lat, body.entry_lng);
+  const exitGeo = geoPair(body.exit_lat, body.exit_lng);
   const saved = await pool.query(
-    `INSERT INTO day_shifts (driver_id, shift_date, taxi_id, entry_time, entry_km, exit_time, exit_km)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO day_shifts (company_id, driver_id, shift_date, taxi_id, entry_time, entry_km, exit_time, exit_km, entry_lat, entry_lng, exit_lat, exit_lng)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      ON CONFLICT (driver_id, shift_date) DO UPDATE
        SET taxi_id = EXCLUDED.taxi_id, entry_time = EXCLUDED.entry_time,
            entry_km = EXCLUDED.entry_km, exit_time = EXCLUDED.exit_time,
-           exit_km = EXCLUDED.exit_km
+           exit_km = EXCLUDED.exit_km,
+           entry_lat = COALESCE(EXCLUDED.entry_lat, day_shifts.entry_lat),
+           entry_lng = COALESCE(EXCLUDED.entry_lng, day_shifts.entry_lng),
+           exit_lat = COALESCE(EXCLUDED.exit_lat, day_shifts.exit_lat),
+           exit_lng = COALESCE(EXCLUDED.exit_lng, day_shifts.exit_lng)
      RETURNING *`,
-    [driverId, body.shift_date, taxiId, body.entry_time, entryKm, exitTime, exitKm]
+    [driver.rows[0].company_id, driverId, body.shift_date, taxiId, body.entry_time, entryKm, exitTime, exitKm,
+     entryGeo ? entryGeo.lat : null, entryGeo ? entryGeo.lng : null,
+     exitGeo ? exitGeo.lat : null, exitGeo ? exitGeo.lng : null]
   );
   const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [saved.rows[0].id]);
   res.status(200).json(withKm(full.rows[0]));

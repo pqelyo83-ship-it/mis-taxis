@@ -36,7 +36,8 @@ module.exports = async function handler(req, res) {
     const result = await pool.query(
       `SELECT u.*, t.identifier AS taxi_identifier FROM users u
        LEFT JOIN taxis t ON t.id = u.taxi_id
-       WHERE u.role = 'driver' ORDER BY u.name`
+       WHERE u.role = 'driver' AND u.company_id = $1 ORDER BY u.name`,
+      [user.company_id]
     );
     res.status(200).json(result.rows.map(publicDriver));
     return;
@@ -56,9 +57,9 @@ module.exports = async function handler(req, res) {
     }
     const salt = newSalt();
     const result = await pool.query(
-      `INSERT INTO users (name, role, phone, taxi_id, commission_pct, commission_day_pct, commission_night_pct, pin_hash, pin_salt, active)
+      `INSERT INTO users (company_id, name, role, phone, taxi_id, commission_pct, commission_day_pct, commission_night_pct, pin_hash, pin_salt, active)
        VALUES ($1, 'driver', $2, $3, $4, $5, $6, $7, $8, TRUE) RETURNING *`,
-      [name, String(body.phone || ''), body.taxi_id ? Number(body.taxi_id) : null, dayPct, dayPct, nightPct, hashPin(pin, salt), salt]
+      [user.company_id, name, String(body.phone || ''), body.taxi_id ? Number(body.taxi_id) : null, dayPct, dayPct, nightPct, hashPin(pin, salt), salt]
     );
     res.status(201).json(publicDriver(result.rows[0]));
     return;
@@ -69,7 +70,7 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Falta id' });
       return;
     }
-    const current = await pool.query("SELECT * FROM users WHERE id = $1 AND role = 'driver'", [id]);
+    const current = await pool.query("SELECT * FROM users WHERE id = $1 AND role = 'driver' AND company_id = $2", [id, user.company_id]);
     if (!current.rows[0]) {
       res.status(404).json({ error: 'Chofer no encontrado' });
       return;
@@ -121,7 +122,7 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Falta id' });
       return;
     }
-    await pool.query("UPDATE users SET active = FALSE WHERE id = $1 AND role = 'driver'", [id]);
+    await pool.query("UPDATE users SET active = FALSE WHERE id = $1 AND role = 'driver' AND company_id = $2", [id, user.company_id]);
     res.status(200).json({ ok: true });
     return;
   }

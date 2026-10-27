@@ -31,10 +31,31 @@ function withSplit(row) {
     amount: row.amount,
     pct_snapshot: row.pct_snapshot,
     shift_type: row.shift_type || 'day',
+    trip_lat: row.trip_lat,
+    trip_lng: row.trip_lng,
     driver_keeps: driverKeeps,
     owner_share: round2(amount - driverKeeps),
     created_at: row.created_at,
   };
+}
+
+function validLat(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= -90 && n <= 90 ? n : null;
+}
+
+function validLng(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= -180 && n <= 180 ? n : null;
+}
+
+function geoPair(body) {
+  if (body.trip_lat === undefined && body.trip_lng === undefined) return null;
+  const lat = validLat(body.trip_lat);
+  const lng = validLng(body.trip_lng);
+  return lat !== null && lng !== null ? { lat, lng } : null;
 }
 
 const SELECT_SQL = `
@@ -53,6 +74,9 @@ module.exports = async function handler(req, res) {
   if (req.method === 'GET') {
     const conditions = [];
     const params = [];
+    // Aislamiento por empresa: siempre, para chofer y admin.
+    params.push(user.company_id);
+    conditions.push('tr.company_id = $' + params.length);
     if (user.role === 'driver') {
       params.push(user.id);
       conditions.push('tr.driver_id = $' + params.length);
@@ -74,8 +98,8 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'POST') {
     const driverId = user.role === 'admin' && body.driver_id ? Number(body.driver_id) : user.id;
-    const driver = await pool.query("SELECT id, commission_pct, commission_day_pct, commission_night_pct, taxi_id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
-    if (!driver.rows[0]) {
+    const driver = await pool.query("SELECT id, commission_pct, commission_day_pct, commission_night_pct, taxi_id, company_id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
+    if (!driver.rows[0] || driver.rows[0].company_id !== user.company_id) {
       res.status(400).json({ error: 'Chofer inválido' });
       return;
     }
@@ -99,10 +123,11 @@ module.exports = async function handler(req, res) {
       );
       taxiId = shift.rows[0] ? shift.rows[0].taxi_id : driver.rows[0].taxi_id;
     }
+    const geo = geoPair(body);
     const inserted = await pool.query(
-      `INSERT INTO trips (driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type)
-       VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, $4, $5, $6) RETURNING *`,
-      [driverId, taxiId, body.trip_date, amount, pct, shiftType]
+      `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng)
+       VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9) RETURNING *`,
+      [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [inserted.rows[0].id]);
     res.status(201).json(withSplit(full.rows[0]));
@@ -117,6 +142,10 @@ module.exports = async function handler(req, res) {
     const current = await pool.query('SELECT * FROM trips WHERE id = $1', [id]);
     if (!current.rows[0]) {
       res.status(404).json({ error: 'Viaje no encontrado' });
+      return;
+    }
+    if (current.rows[0].company_id !== user.company_id) {
+      res.status(403).json({ error: 'Sin permiso' });
       return;
     }
     if (user.role === 'driver' && current.rows[0].driver_id !== user.id) {
@@ -145,9 +174,13 @@ module.exports = async function handler(req, res) {
         ? (d.commission_night_pct !== null && d.commission_night_pct !== undefined ? d.commission_night_pct : d.commission_pct)
         : (d.commission_day_pct !== null && d.commission_day_pct !== undefined ? d.commission_day_pct : d.commission_pct);
     }
+    // La ubicación solo cambia si viene en el body; si no, se conserva.
+    const geo = geoPair(body);
+    const newLat = geo ? geo.lat : current.rows[0].trip_lat;
+    const newLng = geo ? geo.lng : current.rows[0].trip_lng;
     const updated = await pool.query(
-      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3, shift_type = $4, pct_snapshot = $5 WHERE id = $6 RETURNING *`,
-      [body.trip_date, amount, taxiId, newShiftType, newPct, id]
+      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3, shift_type = $4, pct_snapshot = $5, trip_lat = $6, trip_lng = $7 WHERE id = $8 RETURNING *`,
+      [body.trip_date, amount, taxiId, newShiftType, newPct, newLat, newLng, id]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [updated.rows[0].id]);
     res.status(200).json(withSplit(full.rows[0]));

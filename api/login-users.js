@@ -1,13 +1,19 @@
-// GET /api/login-users — lista pública para la pantalla de ingreso:
-// solo id, nombre y rol de usuarios activos. Sin hashes ni PINes.
-// La pantalla muestra los nombres para que cada uno seleccione el suyo y ponga su PIN.
+// GET /api/login-users — lista pública para la pantalla de ingreso, POR EMPRESA:
+// solo id, nombre y rol de usuarios activos de esa empresa. Sin hashes ni PINes.
+// Requiere ?company_id= : sin empresa no se lista a nadie (aislamiento entre empresas).
 
 const { getPool, methodNotAllowed } = require('./_db');
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'GET') return methodNotAllowed(res);
+  const companyId = req.query && req.query.company_id ? Number(req.query.company_id) : null;
+  if (!companyId) {
+    res.status(400).json({ error: 'Falta la empresa' });
+    return;
+  }
   const result = await getPool().query(
-    "SELECT id, name, role FROM users WHERE active = TRUE ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name"
+    "SELECT id, name, role FROM users WHERE active = TRUE AND company_id = $1 ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name",
+    [companyId]
   );
   res.status(200).json(result.rows);
 };
