@@ -326,6 +326,52 @@
     });
   }
 
+  // Comprime la foto de la factura en el celular antes de subirla:
+  // lado máximo 1200px, JPEG. Si igual queda pesada, reintenta más chica.
+  function compressReceiptImage(file) {
+    function attempt(maxSide, quality) {
+      return new Promise(function (resolve, reject) {
+        var img = new Image();
+        var url = URL.createObjectURL(file);
+        img.onload = function () {
+          var scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(url);
+          resolve(canvas.toDataURL('image/jpeg', quality));
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('No se pudo leer la foto')); };
+        img.src = url;
+      });
+    }
+    return attempt(1200, 0.8).then(function (dataUrl) {
+      if (dataUrl.length <= 650000) return dataUrl;
+      return attempt(900, 0.6).then(function (smaller) {
+        if (smaller.length <= 650000) return smaller;
+        throw new Error('La foto quedó demasiado grande, probá con otra foto');
+      });
+    });
+  }
+
+  function showReceiptImage(dataUrl) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;padding:16px;box-sizing:border-box;';
+    var img = document.createElement('img');
+    img.src = dataUrl;
+    img.style.cssText = 'max-width:100%;max-height:85vh;object-fit:contain;';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Cerrar';
+    btn.style.cssText = 'margin-top:12px;';
+    btn.addEventListener('click', function () { overlay.remove(); });
+    overlay.addEventListener('click', function (ev) { if (ev.target === overlay) overlay.remove(); });
+    overlay.appendChild(img);
+    overlay.appendChild(btn);
+    document.body.appendChild(overlay);
+  }
+
   // ---------- Gastos ----------
 
   async function renderExpenses() {
@@ -338,12 +384,14 @@
         '<label>Tipo <select name="type"><option value="gasolina">Gasolina</option><option value="arreglos">Arreglos</option><option value="otros">Otros</option></select></label>' +
         '<label>Monto (USD) <input name="amount" type="number" step="0.01" min="0" required></label>' +
         '<label>Nota <input name="note" type="text" placeholder="Ej: nafta de la mañana"></label>' +
+        '<label>Foto de la factura <input name="receipt" type="file" accept="image/*"></label>' +
         '<button type="submit">Guardar gasto</button></form>';
     }
     var rows = expenses.map(function (g) {
       return '<div class="card"><p><strong>' + esc(g.expense_date) + '</strong> · ' + esc(g.type) + ' · ' + money(g.amount) +
         (g.driver_name ? ' · ' + esc(g.driver_name) : '') + '</p>' +
         (g.note ? '<p>' + esc(g.note) + '</p>' : '') +
+        (g.has_receipt ? '<button type="button" class="small" data-receipt-expense="' + g.id + '">Ver factura</button> ' : '') +
         '<button type="button" class="danger small" data-del-expense="' + g.id + '">Borrar</button></div>';
     }).join('');
     contentEl.innerHTML = '<h2>' + title + '</h2>' + formHtml + '<h3>Lista</h3>' + (rows || '<p class="muted">Todavía no hay gastos.</p>');
@@ -352,17 +400,29 @@
       form.addEventListener('submit', async function (ev) {
         ev.preventDefault();
         try {
+          var receiptImage = null;
+          var file = form.receipt && form.receipt.files && form.receipt.files[0];
+          if (file) receiptImage = await compressReceiptImage(file);
           await api('/api/expenses', 'POST', {
             expense_date: form.expense_date.value,
             type: form.type.value,
             amount: form.amount.value,
             note: form.note.value,
+            receipt_image: receiptImage,
           });
           showMessage('Gasto guardado.', 'ok');
           renderTab();
         } catch (e) { showMessage(e.message, 'error'); }
       });
     }
+    contentEl.querySelectorAll('[data-receipt-expense]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        try {
+          var data = await api('/api/receipt?id=' + btn.getAttribute('data-receipt-expense'));
+          showReceiptImage(data.image);
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
     contentEl.querySelectorAll('[data-del-expense]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         if (!confirm('¿Borrar este gasto?')) return;

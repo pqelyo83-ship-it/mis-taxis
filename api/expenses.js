@@ -20,6 +20,7 @@ function publicExpense(row) {
     type: row.type,
     amount: row.amount,
     note: row.note,
+    has_receipt: !!row.receipt_image,
     created_at: row.created_at,
   };
 }
@@ -63,9 +64,16 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Chofer inválido' });
       return;
     }
+    // La foto llega ya comprimida desde el celular (JPEG, lado máximo 1200px).
+    // Se guarda como data URL en texto; el tope protege la base gratuita.
+    const receiptImage = typeof body.receipt_image === 'string' ? body.receipt_image : '';
+    if (receiptImage && (!receiptImage.startsWith('data:image/jpeg;base64,') || receiptImage.length > 700000)) {
+      res.status(400).json({ error: 'La foto de la factura es demasiado grande' });
+      return;
+    }
     const result = await pool.query(
-      'INSERT INTO expenses (driver_id, expense_date, type, amount, note) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [driverId, body.expense_date, body.type, amount, String(body.note || '')]
+      'INSERT INTO expenses (driver_id, expense_date, type, amount, note, receipt_image) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [driverId, body.expense_date, body.type, amount, String(body.note || ''), receiptImage || null]
     );
     res.status(201).json(publicExpense(result.rows[0]));
     return;

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS expenses (
   type TEXT NOT NULL CHECK (type IN ('gasolina', 'arreglos', 'otros')),
   amount NUMERIC(10,2) NOT NULL CHECK (amount >= 0),
   note TEXT NOT NULL DEFAULT '',
+  receipt_image TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
