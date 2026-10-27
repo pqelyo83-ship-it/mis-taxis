@@ -58,7 +58,7 @@ module.exports = async function handler(req, res) {
     const salt = newSalt();
     const result = await pool.query(
       `INSERT INTO users (company_id, name, role, phone, taxi_id, commission_pct, commission_day_pct, commission_night_pct, pin_hash, pin_salt, active)
-       VALUES ($1, 'driver', $2, $3, $4, $5, $6, $7, $8, TRUE) RETURNING *`,
+       VALUES ($1, $2, 'driver', $3, $4, $5, $6, $7, $8, $9, TRUE) RETURNING *`,
       [user.company_id, name, String(body.phone || ''), body.taxi_id ? Number(body.taxi_id) : null, dayPct, dayPct, nightPct, hashPin(pin, salt), salt]
     );
     res.status(201).json(publicDriver(result.rows[0]));
