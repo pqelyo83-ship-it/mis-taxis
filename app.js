@@ -1000,14 +1000,36 @@
 
   async function renderCompany() {
     var company = await api('/api/company');
+    var driverLink = window.location.origin + '/?company=' + company.code;
     contentEl.innerHTML = '<h2>Mi empresa</h2>' +
-      '<p class="muted">Código de empresa: <strong>' + esc(company.code) + '</strong> — tus choferes la eligen con este código al ingresar (o con el enlace mis-taxis-ebon.vercel.app/?company=' + esc(company.code) + ').</p>' +
+      '<div class="card"><p><strong>Link para tus choferes</strong></p>' +
+      '<p><a href="' + esc(driverLink) + '">' + esc(driverLink) + '</a></p>' +
+      '<p><button type="button" id="copy-driver-link-btn">Copiar link</button></p>' +
+      '<p class="muted">Mandales este link a tus choferes: abre el ingreso con tu empresa ya seleccionada; cada uno elige su nombre y escribe su PIN. También pueden entrar eligiendo tu empresa con el código <strong>' + esc(company.code) + '</strong>.</p></div>' +
       '<form id="company-form">' +
       '<label>Nombre de la empresa <input name="name" type="text" value="' + esc(company.name) + '" required></label>' +
       '<label>La noche empieza a las (hora 0-23) <input name="night_start" type="number" min="0" max="23" value="' + esc(company.night_start) + '" required></label>' +
       '<label>La noche termina a las (hora 0-23) <input name="night_end" type="number" min="0" max="23" value="' + esc(company.night_end) + '" required></label>' +
       '<button type="submit">Guardar empresa</button></form>' +
       '<p class="muted">El horario de noche define qué viajes se preseleccionan como nocturnos en el celular del chofer; el chofer igual puede cambiar el turno por viaje.</p>';
+    document.getElementById('copy-driver-link-btn').addEventListener('click', async function () {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(driverLink);
+          showMessage('Link copiado.', 'ok');
+          return;
+        }
+        throw new Error('sin clipboard');
+      } catch (e) {
+        var tmp = document.createElement('textarea');
+        tmp.value = driverLink;
+        document.body.appendChild(tmp);
+        tmp.select();
+        try { document.execCommand('copy'); showMessage('Link copiado.', 'ok'); }
+        catch (e2) { showMessage('No se pudo copiar: ' + driverLink, 'error'); }
+        tmp.remove();
+      }
+    });
     document.getElementById('company-form').addEventListener('submit', async function (ev) {
       ev.preventDefault();
       var f = ev.target;
