@@ -1115,6 +1115,17 @@
   async function renderEmpresas() {
     var companies = await api('/api/company?panel=1');
     var origin = window.location.origin;
+    var demo = companies.find(function (c) { return c.name === 'Demo'; });
+    var demoLink = demo ? origin + '/?company=' + esc(demo.code) : '';
+    var demoCard = !demo
+      ? '<div class="card"><p><strong>Link de test</strong></p><p class="muted">La empresa Demo no existe todavía.</p></div>'
+      : !demo.active
+        ? '<div class="card"><p><strong>Link de test (empresa Demo)</strong></p><p class="muted">La demo está suspendida: reactivala desde su tarjeta para usar el link de test.</p></div>'
+        : '<div class="card"><p><strong>Link de test (empresa Demo)</strong></p>' +
+          '<p><a href="' + demoLink + '">' + demoLink + '</a> ' +
+          '<button type="button" class="small" data-copy-link="' + demoLink + '">Copiar</button></p>' +
+          '<p><button type="button" id="regen-demo-link">Generar nuevo link de test</button></p>' +
+          '<p class="muted">Al generar uno nuevo, el link anterior deja de llevar a la demo.</p></div>';
     var rows = companies.map(function (c) {
       var link = origin + '/?company=' + esc(c.code) + '&login=owner';
       var companyLink = origin + '/?company=' + esc(c.code);
@@ -1136,6 +1147,7 @@
     }).join('');
     contentEl.innerHTML = '<h2>Empresas</h2>' +
       '<p class="muted">Solo vos ves este panel. Acá das de alta a los dueños y los manejás según su pago: podés suspender a quien no pagó (deja de poder entrar) y reactivarlo cuando pague. Borrar elimina la empresa y todos sus datos y no se puede deshacer.</p>' +
+      demoCard +
       (rows || '<p class="muted">Todavía no hay empresas.</p>') +
       '<h3>Dar de alta una empresa</h3>' +
       '<form id="empresa-form">' +
@@ -1160,6 +1172,17 @@
         renderTab();
       } catch (e) { showMessage(e.message, 'error'); }
     });
+    var regenBtn = document.getElementById('regen-demo-link');
+    if (regenBtn) {
+      regenBtn.addEventListener('click', async function () {
+        if (!window.confirm('¿Generar un nuevo link de test? El link anterior dejará de funcionar.')) return;
+        try {
+          var result = await api('/api/company?panel=1', 'POST', { regenerate_demo: true });
+          showMessage('Nuevo link de test: ' + window.location.origin + '/?company=' + result.code, 'ok');
+          renderTab();
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    }
     contentEl.querySelectorAll('[data-copy-link]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         var url = btn.getAttribute('data-copy-link');

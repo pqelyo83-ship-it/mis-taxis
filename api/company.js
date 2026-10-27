@@ -4,6 +4,9 @@
 //   GET /api/company?list=1   — lista pública de empresas activas (pantalla de ingreso).
 //   GET /api/company?code=XX  — una empresa activa por código (ingreso con link, sin lista).
 //   GET /api/company?panel=1  — lista de empresas con su dueño (solo superadmin).
+//   POST /api/company?panel=1 — regenerar el link de test: cambia el código
+//     de la empresa Demo por uno nuevo (solo superadmin, nunca la propia).
+//     El link anterior deja de llevar a la demo.
 //   POST /api/company         — alta de empresa + dueño con email y PIN (solo superadmin).
 //   PUT /api/company?panel=1&id= — editar empresa/dueño, suspender/reactivar, pago (solo superadmin, nunca la propia).
 //   DELETE /api/company?panel=1&id= — borrar empresa y todos sus datos (solo superadmin, nunca la propia).
@@ -50,6 +53,53 @@ module.exports = async function handler(req, res) {
       return;
     }
     res.status(200).json(result.rows[0]);
+    return;
+  }
+
+  // Regenerar el link de test (solo superadmin): cambia el código de la
+  // empresa Demo por uno nuevo; el link anterior deja de llevar a la demo.
+  // Solo la empresa llamada exactamente 'Demo': nunca la propia ni una
+  // empresa real (cambiar el código rompería los links de sus choferes).
+  // Body: { regenerate_demo: true }.
+  if (req.method === 'POST' && req.query && req.query.panel === '1') {
+    const user = await requireAuth(req, res, ['admin']);
+    if (!user) return;
+    if (!user.is_superadmin) {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    const body = readBody(req);
+    if (!body.regenerate_demo) {
+      res.status(400).json({ error: 'Acción no reconocida' });
+      return;
+    }
+    const demos = await pool.query("SELECT id, code FROM companies WHERE name = 'Demo'");
+    if (!demos.rows[0]) {
+      res.status(404).json({ error: 'La empresa Demo no existe' });
+      return;
+    }
+    if (demos.rows.length > 1) {
+      res.status(500).json({ error: 'Hay más de una empresa Demo, no se cambió nada' });
+      return;
+    }
+    const demo = demos.rows[0];
+    if (demo.id === user.company_id) {
+      res.status(403).json({ error: 'No podés cambiar el código de tu propia empresa' });
+      return;
+    }
+    let code = null;
+    for (let attempt = 0; attempt < 10 && !code; attempt++) {
+      const candidate = makeCode();
+      if (candidate === demo.code) continue;
+      const exists = await pool.query('SELECT id FROM companies WHERE code = $1', [candidate]);
+      if (!exists.rows[0]) code = candidate;
+    }
+    if (!code) {
+      res.status(500).json({ error: 'No se pudo generar el código nuevo, intentá de nuevo' });
+      return;
+    }
+    await pool.query('UPDATE companies SET code = $1 WHERE id = $2', [code, demo.id]);
+    res.status(200).json({ code: code });
     return;
   }
 
