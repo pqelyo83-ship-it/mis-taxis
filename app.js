@@ -1,8 +1,8 @@
 // Mis Taxis — app de una sola página (JavaScript sin compilación).
 // Habla solo con estas rutas de la API: /api/auth, /api/login-users,
-// /api/companies, /api/register, /api/company, /api/taxis, /api/drivers,
+// /api/company, /api/taxis, /api/drivers,
 // /api/trips, /api/expenses, /api/day-close, /api/change-pin, /api/report,
-// /api/shifts, /api/receipt.
+// /api/shifts.
 
 (function () {
   'use strict';
@@ -117,7 +117,7 @@
     var select = document.getElementById('company-select');
     if (!select) return;
     try {
-      var companies = await api('/api/companies');
+      var companies = await api('/api/company?list=1');
       if (!companies || !companies.length) {
         select.innerHTML = '<option value="">Sin empresas</option>';
         return;
@@ -562,7 +562,7 @@
     contentEl.querySelectorAll('[data-receipt-expense]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         try {
-          var data = await api('/api/receipt?id=' + btn.getAttribute('data-receipt-expense'));
+          var data = await api('/api/expenses?receipt=' + btn.getAttribute('data-receipt-expense'));
           showReceiptImage(data.image);
         } catch (e) { showMessage(e.message, 'error'); }
       });
@@ -995,7 +995,7 @@
     var resultEl = document.getElementById('register-result');
     resultEl.classList.add('hidden');
     try {
-      var result = await api('/api/register', 'POST', {
+      var result = await api('/api/company', 'POST', {
         company_name: form.company_name.value,
         admin_name: form.admin_name.value,
         pin: form.pin.value,
