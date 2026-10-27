@@ -30,6 +30,7 @@ function withSplit(row) {
     exit_km: row.exit_km,
     amount: row.amount,
     pct_snapshot: row.pct_snapshot,
+    shift_type: row.shift_type || 'day',
     driver_keeps: driverKeeps,
     owner_share: round2(amount - driverKeeps),
     created_at: row.created_at,
@@ -73,12 +74,17 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'POST') {
     const driverId = user.role === 'admin' && body.driver_id ? Number(body.driver_id) : user.id;
-    const driver = await pool.query("SELECT id, commission_pct, taxi_id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
+    const driver = await pool.query("SELECT id, commission_pct, commission_day_pct, commission_night_pct, taxi_id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
     if (!driver.rows[0]) {
       res.status(400).json({ error: 'Chofer inválido' });
       return;
     }
     const amount = toNumber(body.amount, NaN);
+    // Turno del viaje: 'day' o 'night'. El % que se aplica es el del turno.
+    const shiftType = body.shift_type === 'night' ? 'night' : 'day';
+    const pct = shiftType === 'night'
+      ? (driver.rows[0].commission_night_pct !== null ? driver.rows[0].commission_night_pct : driver.rows[0].commission_pct)
+      : (driver.rows[0].commission_day_pct !== null ? driver.rows[0].commission_day_pct : driver.rows[0].commission_pct);
     if (!body.trip_date || !Number.isFinite(amount) || amount < 0) {
       res.status(400).json({ error: 'Datos del viaje inválidos (revisá fecha y monto)' });
       return;
@@ -94,9 +100,9 @@ module.exports = async function handler(req, res) {
       taxiId = shift.rows[0] ? shift.rows[0].taxi_id : driver.rows[0].taxi_id;
     }
     const inserted = await pool.query(
-      `INSERT INTO trips (driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot)
-       VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, $4, $5) RETURNING *`,
-      [driverId, taxiId, body.trip_date, amount, driver.rows[0].commission_pct]
+      `INSERT INTO trips (driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type)
+       VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, $4, $5, $6) RETURNING *`,
+      [driverId, taxiId, body.trip_date, amount, pct, shiftType]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [inserted.rows[0].id]);
     res.status(201).json(withSplit(full.rows[0]));
@@ -128,9 +134,20 @@ module.exports = async function handler(req, res) {
       return;
     }
     const taxiId = body.taxi_id ? Number(body.taxi_id) : current.rows[0].taxi_id;
+    // Si cambia el turno, el % se recalcula con el % actual del chofer para ese turno.
+    const newShiftType = body.shift_type === 'night' || body.shift_type === 'day'
+      ? body.shift_type : (current.rows[0].shift_type || 'day');
+    let newPct = current.rows[0].pct_snapshot;
+    if (newShiftType !== (current.rows[0].shift_type || 'day')) {
+      const driver = await pool.query("SELECT commission_pct, commission_day_pct, commission_night_pct FROM users WHERE id = $1", [current.rows[0].driver_id]);
+      const d = driver.rows[0] || {};
+      newPct = newShiftType === 'night'
+        ? (d.commission_night_pct !== null && d.commission_night_pct !== undefined ? d.commission_night_pct : d.commission_pct)
+        : (d.commission_day_pct !== null && d.commission_day_pct !== undefined ? d.commission_day_pct : d.commission_pct);
+    }
     const updated = await pool.query(
-      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3 WHERE id = $4 RETURNING *`,
-      [body.trip_date, amount, taxiId, id]
+      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3, shift_type = $4, pct_snapshot = $5 WHERE id = $6 RETURNING *`,
+      [body.trip_date, amount, taxiId, newShiftType, newPct, id]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [updated.rows[0].id]);
     res.status(200).json(withSplit(full.rows[0]));

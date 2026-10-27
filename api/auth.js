@@ -21,7 +21,7 @@ module.exports = async function handler(req, res) {
   let match = null;
   if (userId) {
     const result = await getPool().query(
-      'SELECT id, name, role, phone, taxi_id, commission_pct, pin_hash, pin_salt, active FROM users WHERE id = $1',
+      'SELECT id, name, role, phone, taxi_id, commission_pct, commission_day_pct, commission_night_pct, pin_hash, pin_salt, active FROM users WHERE id = $1',
       [userId]
     );
     const row = result.rows[0];
@@ -39,7 +39,7 @@ module.exports = async function handler(req, res) {
     match = row;
   } else {
     const result = await getPool().query(
-      'SELECT id, name, role, phone, taxi_id, commission_pct, pin_hash, pin_salt, active FROM users'
+      'SELECT id, name, role, phone, taxi_id, commission_pct, commission_day_pct, commission_night_pct, pin_hash, pin_salt, active FROM users'
     );
     for (const row of result.rows) {
       if (!row.active) continue;
@@ -72,6 +72,8 @@ module.exports = async function handler(req, res) {
       phone: match.phone,
       taxi_id: match.taxi_id,
       commission_pct: match.commission_pct,
+      commission_day_pct: match.commission_day_pct !== null && match.commission_day_pct !== undefined ? match.commission_day_pct : match.commission_pct,
+      commission_night_pct: match.commission_night_pct !== null && match.commission_night_pct !== undefined ? match.commission_night_pct : match.commission_pct,
     },
   });
 };

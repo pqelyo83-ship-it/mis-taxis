@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
   phone TEXT NOT NULL DEFAULT '',
   taxi_id INTEGER REFERENCES taxis(id) ON DELETE SET NULL,
   commission_pct NUMERIC(5,2) NOT NULL DEFAULT 0 CHECK (commission_pct >= 0 AND commission_pct <= 100),
+  commission_day_pct NUMERIC(5,2) CHECK (commission_day_pct >= 0 AND commission_day_pct <= 100),
+  commission_night_pct NUMERIC(5,2) CHECK (commission_night_pct >= 0 AND commission_night_pct <= 100),
   pin_hash TEXT NOT NULL,
   pin_salt TEXT NOT NULL,
   active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -35,6 +37,7 @@ CREATE TABLE IF NOT EXISTS trips (
   exit_km NUMERIC(10,2) CHECK (exit_km >= 0),
   amount NUMERIC(10,2) NOT NULL CHECK (amount >= 0),
   pct_snapshot NUMERIC(5,2) NOT NULL CHECK (pct_snapshot >= 0 AND pct_snapshot <= 100),
+  shift_type VARCHAR(10) NOT NULL DEFAULT 'day' CHECK (shift_type IN ('day', 'night')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CHECK (exit_km IS NULL OR exit_km >= entry_km)
 );

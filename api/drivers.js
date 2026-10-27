@@ -14,9 +14,16 @@ function publicDriver(row) {
     taxi_id: row.taxi_id,
     taxi_identifier: row.taxi_identifier || null,
     commission_pct: row.commission_pct,
+    commission_day_pct: row.commission_day_pct !== null && row.commission_day_pct !== undefined ? row.commission_day_pct : row.commission_pct,
+    commission_night_pct: row.commission_night_pct !== null && row.commission_night_pct !== undefined ? row.commission_night_pct : row.commission_pct,
     active: row.active,
     created_at: row.created_at,
   };
+}
+
+function validPct(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
 }
 
 module.exports = async function handler(req, res) {
@@ -40,16 +47,18 @@ module.exports = async function handler(req, res) {
   if (req.method === 'POST') {
     const name = String(body.name || '').trim();
     const pin = String(body.pin || '');
-    const pct = Number(body.commission_pct);
-    if (!name || !pin || !Number.isFinite(pct) || pct < 0 || pct > 100) {
-      res.status(400).json({ error: 'Faltan nombre, PIN o % válido (0 a 100)' });
+    // % día y % noche; si viene solo el % viejo, vale para los dos.
+    const dayPct = validPct(body.commission_day_pct !== undefined ? body.commission_day_pct : body.commission_pct);
+    const nightPct = validPct(body.commission_night_pct !== undefined ? body.commission_night_pct : body.commission_pct);
+    if (!name || !pin || dayPct === null || nightPct === null) {
+      res.status(400).json({ error: 'Faltan nombre, PIN o % válido (0 a 100) para día y noche' });
       return;
     }
     const salt = newSalt();
     const result = await pool.query(
-      `INSERT INTO users (name, role, phone, taxi_id, commission_pct, pin_hash, pin_salt, active)
-       VALUES ($1, 'driver', $2, $3, $4, $5, $6, TRUE) RETURNING *`,
-      [name, String(body.phone || ''), body.taxi_id ? Number(body.taxi_id) : null, pct, hashPin(pin, salt), salt]
+      `INSERT INTO users (name, role, phone, taxi_id, commission_pct, commission_day_pct, commission_night_pct, pin_hash, pin_salt, active)
+       VALUES ($1, 'driver', $2, $3, $4, $5, $6, $7, $8, TRUE) RETURNING *`,
+      [name, String(body.phone || ''), body.taxi_id ? Number(body.taxi_id) : null, dayPct, dayPct, nightPct, hashPin(pin, salt), salt]
     );
     res.status(201).json(publicDriver(result.rows[0]));
     return;
@@ -65,9 +74,17 @@ module.exports = async function handler(req, res) {
       res.status(404).json({ error: 'Chofer no encontrado' });
       return;
     }
-    const pct = Number(body.commission_pct);
-    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
-      res.status(400).json({ error: '% inválido (0 a 100)' });
+    // En edición, solo cambian los % que vienen en el body.
+    const dayPct = body.commission_day_pct !== undefined || body.commission_pct !== undefined
+      ? validPct(body.commission_day_pct !== undefined ? body.commission_day_pct : body.commission_pct) : null;
+    const nightPct = body.commission_night_pct !== undefined || body.commission_pct !== undefined
+      ? validPct(body.commission_night_pct !== undefined ? body.commission_night_pct : body.commission_pct) : null;
+    if ((body.commission_day_pct !== undefined || body.commission_pct !== undefined) && dayPct === null) {
+      res.status(400).json({ error: '% día inválido (0 a 100)' });
+      return;
+    }
+    if ((body.commission_night_pct !== undefined || body.commission_pct !== undefined) && nightPct === null) {
+      res.status(400).json({ error: '% noche inválido (0 a 100)' });
       return;
     }
     let pinHash = current.rows[0].pin_hash;
@@ -76,14 +93,19 @@ module.exports = async function handler(req, res) {
       pinSalt = newSalt();
       pinHash = hashPin(String(body.pin), pinSalt);
     }
+    const newDay = dayPct !== null ? dayPct : (current.rows[0].commission_day_pct !== null ? current.rows[0].commission_day_pct : current.rows[0].commission_pct);
+    const newNight = nightPct !== null ? nightPct : (current.rows[0].commission_night_pct !== null ? current.rows[0].commission_night_pct : current.rows[0].commission_pct);
     const result = await pool.query(
       `UPDATE users SET name = $1, phone = $2, taxi_id = $3, commission_pct = $4,
-       pin_hash = $5, pin_salt = $6, active = $7 WHERE id = $8 RETURNING *`,
+       commission_day_pct = $5, commission_night_pct = $6,
+       pin_hash = $7, pin_salt = $8, active = $9 WHERE id = $10 RETURNING *`,
       [
         String(body.name || current.rows[0].name).trim(),
         String(body.phone !== undefined ? body.phone : current.rows[0].phone),
         body.taxi_id ? Number(body.taxi_id) : null,
-        pct,
+        newDay,
+        newDay,
+        newNight,
         pinHash,
         pinSalt,
         body.active !== false,

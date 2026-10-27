@@ -293,11 +293,37 @@
         ? '<p>Entrada: ' + esc(t.entry_time) + ' · ' + esc(t.entry_km) + ' km — Salida: ' + esc(t.exit_time) + ' · ' + esc(t.exit_km) + ' km</p>'
         : '';
       return '<div class="card"><p><strong>' + esc(t.trip_date) + '</strong> · ' + esc(t.driver_name || user.name) +
-        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + '</p>' + shiftLine +
+        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + ' · Turno: ' + (t.shift_type === 'night' ? 'Noche' : 'Día') + '</p>' + shiftLine +
         '<p>Monto: ' + money(t.amount) + ' · %: ' + esc(t.pct_snapshot) + '% · Te quedás: ' + money(t.driver_keeps) + ' · Dueño: ' + money(t.owner_share) + '</p>' +
+        '<button type="button" class="secondary small" data-edit-trip="' + t.id + '">Editar</button> ' +
         '<button type="button" class="danger small" data-del-trip="' + t.id + '">Borrar</button></div>';
     }).join('');
     contentEl.innerHTML = '<h2>' + title + '</h2>' + (rows || '<p class="muted">Todavía no hay viajes.</p>');
+    contentEl.querySelectorAll('[data-edit-trip]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var t = trips.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-trip'); });
+        var card = btn.closest('.card');
+        card.innerHTML = '<form class="row">' +
+          '<label>Fecha <input name="trip_date" type="date" value="' + esc(t.trip_date) + '" required></label>' +
+          '<label>Turno <select name="shift_type"><option value="day"' + (t.shift_type === 'night' ? '' : ' selected') + '>Día</option><option value="night"' + (t.shift_type === 'night' ? ' selected' : '') + '>Noche</option></select></label>' +
+          '<label>Monto (USD) <input name="amount" type="number" step="0.01" min="0" value="' + esc(t.amount) + '" required></label>' +
+          '<button type="submit">Guardar cambios</button> <button type="button" data-cancel-edit>Cancelar</button></form>';
+        var f = card.querySelector('form');
+        f.addEventListener('submit', async function (ev) {
+          ev.preventDefault();
+          try {
+            await api('/api/trips?id=' + t.id, 'PUT', {
+              trip_date: f.trip_date.value,
+              shift_type: f.shift_type.value,
+              amount: f.amount.value,
+            });
+            showMessage('Viaje actualizado.', 'ok');
+            renderTab();
+          } catch (e) { showMessage(e.message, 'error'); }
+        });
+        card.querySelector('[data-cancel-edit]').addEventListener('click', function () { renderTab(); });
+      });
+    });
     contentEl.querySelectorAll('[data-del-trip]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         if (!confirm('¿Borrar este viaje?')) return;
@@ -311,11 +337,18 @@
   }
 
   function tripFormHtml() {
+    var hour = new Date().getHours();
+    var nightDefault = hour >= 22 || hour < 6;
+    var pctNote = '';
+    if (user.commission_day_pct !== undefined && user.commission_night_pct !== undefined) {
+      pctNote = ' Tu %: día ' + esc(user.commission_day_pct) + '% · noche ' + esc(user.commission_night_pct) + '%.';
+    }
     return '<h2>Nuevo viaje</h2><form id="trip-form">' +
       '<label>Fecha <input name="trip_date" type="date" value="' + todayLocal() + '" required></label>' +
+      '<label>Turno <select name="shift_type"><option value="day"' + (nightDefault ? '' : ' selected') + '>Día</option><option value="night"' + (nightDefault ? ' selected' : '') + '>Noche</option></select></label>' +
       '<label>Monto del viaje (USD) <input name="amount" type="number" step="0.01" min="0" required></label>' +
       '<button type="submit">Guardar viaje</button></form>' +
-      '<p class="muted">Solo el monto: la hora y el kilometraje van en "Mi día". El % que se aplica es el que te puso el administrador. Si cambia después, tus viajes viejos no cambian.</p>';
+      '<p class="muted">Solo el monto: la hora y el kilometraje van en "Mi día". El % que se aplica es el de tu turno (día o noche), puesto por el administrador.' + pctNote + ' Si cambia después, tus viajes viejos no cambian.</p>';
   }
 
   async function renderNewTrip() {
@@ -325,6 +358,7 @@
       var f = ev.target;
       var body = {
         trip_date: f.trip_date.value,
+        shift_type: f.shift_type.value,
         amount: f.amount.value,
       };
       try {
@@ -485,6 +519,47 @@
         }).join('') + '</tbody></table></div>';
     }
 
+    function csvCell(v) {
+      var s = String(v === null || v === undefined ? '' : v);
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    function downloadReportCsv(rep) {
+      var lines = [];
+      var t = rep.totals;
+      lines.push('Reporte,' + csvCell(rep.from + ' al ' + rep.to));
+      lines.push('Total recaudado,' + t.total);
+      lines.push('Viajes,' + t.trips_count);
+      lines.push('Km recorridos,' + t.km);
+      lines.push('Dinero por km promedio,' + (t.avg_per_km !== null ? t.avg_per_km : ''));
+      lines.push('Se quedan los choferes,' + t.driver_keeps);
+      lines.push('Gastos,' + t.expenses);
+      lines.push('Deben entregar,' + t.handover_to_owner);
+      lines.push('');
+      lines.push('Por dia,Fecha,Viajes,Recaudado,Km,$/km');
+      rep.per_day.forEach(function (r) {
+        lines.push(['Por dia', r.date, r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''].join(','));
+      });
+      lines.push('');
+      lines.push('Por chofer,Chofer,Viajes,Recaudado,Km,$/km');
+      rep.per_driver.forEach(function (r) {
+        lines.push(['Por chofer', csvCell(r.driver_name), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''].join(','));
+      });
+      lines.push('');
+      lines.push('Por auto,Auto,Viajes,Recaudado,Km,$/km');
+      rep.per_taxi.forEach(function (r) {
+        lines.push(['Por auto', csvCell(r.taxi_identifier), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''].join(','));
+      });
+      var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'reporte-' + rep.from + '-' + rep.to + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
     async function search() {
       var q = 'from=' + encodeURIComponent(form.from.value) + '&to=' + encodeURIComponent(form.to.value);
       if (form.driver_id.value) q += '&driver_id=' + encodeURIComponent(form.driver_id.value);
@@ -500,10 +575,13 @@
           '<p>Se quedan los choferes: ' + money(t.driver_keeps) + ' · Gastos: ' + money(t.expenses) + ' · Deben entregar: <strong>' + money(t.handover_to_owner) + '</strong></p>' +
           '<p class="muted">El $/km se calcula solo sobre días con kilometraje cargado (jornada cerrada). Los días sin jornada no entran en el promedio.' +
           (form.taxi_id.value ? ' Gastos asignados al auto según el taxi del día de cada gasto.' : '') + '</p></div>' +
+          '<button type="button" id="report-csv-btn">Descargar CSV</button>' +
           '<h3>Por día</h3>' + dayRows(rep.per_day);
         if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; });
         if (!form.taxi_id.value) html += '<h3>Por auto</h3>' + breakdownRows(rep.per_taxi, function (r) { return r.taxi_identifier; });
         result.innerHTML = html;
+        var csvBtn = document.getElementById('report-csv-btn');
+        if (csvBtn) csvBtn.addEventListener('click', function () { downloadReportCsv(rep); });
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
     }
 
@@ -548,9 +626,29 @@
   }
 
   async function renderAllCloses() {
+    var drivers = [];
+    var taxis = [];
+    try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+    try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
+    var driverOptions = drivers.map(function (d) {
+      return '<option value="' + d.id + '">' + esc(d.name) + '</option>';
+    }).join('');
+    var taxiOptions = '<option value="">Sin taxi</option>' + taxis.map(function (t) {
+      return '<option value="' + t.id + '">' + esc(t.identifier) + '</option>';
+    }).join('');
     contentEl.innerHTML = '<h2>Cierres del día (todos los choferes)</h2><form id="close-form" class="row">' +
       '<label>Fecha <input name="date" type="date" value="' + todayLocal() + '" required></label>' +
-      '<button type="submit">Ver cierres</button></form><div id="close-result"></div>';
+      '<button type="submit">Ver cierres</button></form><div id="close-result"></div>' +
+      '<h3>Cargar o corregir jornada</h3><form id="shift-form" class="row">' +
+      '<label>Chofer <select name="driver_id">' + driverOptions + '</select></label>' +
+      '<label>Fecha <input name="shift_date" type="date" value="' + todayLocal() + '" required></label>' +
+      '<label>Taxi del día <select name="taxi_id">' + taxiOptions + '</select></label>' +
+      '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
+      '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
+      '<label>Hora de cierre <input name="exit_time" type="time"></label>' +
+      '<label>Km de cierre <input name="exit_km" type="number" step="0.01" min="0"></label>' +
+      '<button type="submit">Guardar jornada</button></form>' +
+      '<p class="muted">Si un chofer olvidó empezar o cerrar el día, cargalo acá. Guardar reemplaza la jornada de ese chofer y fecha.</p>';
     var form = document.getElementById('close-form');
     var result = document.getElementById('close-result');
     async function load() {
@@ -560,6 +658,23 @@
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
     }
     form.addEventListener('submit', function (ev) { ev.preventDefault(); load(); });
+    var shiftForm = document.getElementById('shift-form');
+    shiftForm.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        await api('/api/shifts', 'POST', {
+          driver_id: shiftForm.driver_id.value,
+          shift_date: shiftForm.shift_date.value,
+          taxi_id: shiftForm.taxi_id.value,
+          entry_time: shiftForm.entry_time.value,
+          entry_km: shiftForm.entry_km.value,
+          exit_time: shiftForm.exit_time.value || null,
+          exit_km: shiftForm.exit_km.value === '' ? null : shiftForm.exit_km.value,
+        });
+        showMessage('Jornada guardada.', 'ok');
+        load();
+      } catch (e) { showMessage(e.message, 'error'); }
+    });
     load();
   }
 
@@ -631,7 +746,7 @@
       return '<option value="' + t.id + '">' + esc(t.identifier) + ' · ' + esc(t.plate) + '</option>';
     }).join('');
     var rows = drivers.map(function (d) {
-      return '<div class="card"><p><strong>' + esc(d.name) + '</strong> · ' + esc(d.phone) + ' · Taxi: ' + esc(d.taxi_identifier || '—') + ' · %: ' + esc(d.commission_pct) + ' · ' + (d.active ? 'Activo' : 'Inactivo') + '</p>' +
+      return '<div class="card"><p><strong>' + esc(d.name) + '</strong> · ' + esc(d.phone) + ' · Taxi: ' + esc(d.taxi_identifier || '—') + ' · % día: ' + esc(d.commission_day_pct) + ' · % noche: ' + esc(d.commission_night_pct) + ' · ' + (d.active ? 'Activo' : 'Inactivo') + '</p>' +
         '<div class="row"><button type="button" class="secondary small" data-edit-driver="' + d.id + '">Editar</button>' +
         (d.active ? '<button type="button" class="danger small" data-del-driver="' + d.id + '">Desactivar</button>' : '') + '</div></div>';
     }).join('');
@@ -640,7 +755,8 @@
       '<label>Nombre <input name="name" type="text" required></label>' +
       '<label>Teléfono <input name="phone" type="text"></label>' +
       '<label>Taxi asignado <select name="taxi_id">' + taxiOptions + '</select></label>' +
-      '<label>% del chofer <input name="commission_pct" type="number" step="0.01" min="0" max="100" required></label>' +
+      '<label>% del chofer de día <input name="commission_day_pct" type="number" step="0.01" min="0" max="100" required></label>' +
+      '<label>% del chofer de noche <input name="commission_night_pct" type="number" step="0.01" min="0" max="100" required></label>' +
       '<label>PIN <input name="pin" type="password" inputmode="numeric" placeholder="Al editar, dejar vacío para no cambiarlo"></label>' +
       '<button type="submit">Guardar chofer</button></form><h3>Lista</h3>' +
       (rows || '<p class="muted">Todavía no hay choferes.</p>');
@@ -651,7 +767,8 @@
         name: form.name.value,
         phone: form.phone.value,
         taxi_id: form.taxi_id.value,
-        commission_pct: form.commission_pct.value,
+        commission_day_pct: form.commission_day_pct.value,
+        commission_night_pct: form.commission_night_pct.value,
       };
       if (form.pin.value) body.pin = form.pin.value;
       try {
@@ -673,7 +790,8 @@
         form.name.value = d.name;
         form.phone.value = d.phone || '';
         form.taxi_id.value = d.taxi_id || '';
-        form.commission_pct.value = d.commission_pct;
+        form.commission_day_pct.value = d.commission_day_pct;
+        form.commission_night_pct.value = d.commission_night_pct;
         form.pin.value = '';
         window.scrollTo(0, 0);
       });

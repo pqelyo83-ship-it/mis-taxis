@@ -16,10 +16,10 @@ SELECT 'Administrador', 'admin', '', NULL, 0,
   '9b474ed755b7164232717c50adf85e18', TRUE
 WHERE NOT EXISTS (SELECT 1 FROM users WHERE name = 'Administrador' AND role = 'admin');
 
--- Chofer de prueba (el admin puede editar su %, taxi, teléfono y PIN desde el panel)
-INSERT INTO users (name, role, phone, taxi_id, commission_pct, pin_hash, pin_salt, active)
+-- Chofer de prueba (el admin puede editar sus % día/noche, taxi, teléfono y PIN desde el panel)
+INSERT INTO users (name, role, phone, taxi_id, commission_pct, commission_day_pct, commission_night_pct, pin_hash, pin_salt, active)
 SELECT 'Chofer Test', 'driver', '555-0101',
-  (SELECT id FROM taxis WHERE identifier = 'TAXI-01'), 50,
+  (SELECT id FROM taxis WHERE identifier = 'TAXI-01'), 50, 50, 50,
   'ef4db69f87887cc28be36279ccf9a8761bf614e494ab520f6bfb0ca6346dbee0',
   '9d9727c15084ff2034d90f9a05d26b1a', TRUE
 WHERE NOT EXISTS (SELECT 1 FROM users WHERE name = 'Chofer Test' AND role = 'driver');
