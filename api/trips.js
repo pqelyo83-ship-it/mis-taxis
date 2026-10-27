@@ -79,18 +79,24 @@ module.exports = async function handler(req, res) {
       return;
     }
     const amount = toNumber(body.amount, NaN);
-    const entryKm = toNumber(body.entry_km, NaN);
-    const exitKm = toNumber(body.exit_km, NaN);
-    if (!body.trip_date || !body.entry_time || !body.exit_time || !Number.isFinite(amount) || amount < 0 ||
-        !Number.isFinite(entryKm) || entryKm < 0 || !Number.isFinite(exitKm) || exitKm < entryKm) {
-      res.status(400).json({ error: 'Datos del viaje inválidos (revisá fecha, horas, kilometraje y monto)' });
+    if (!body.trip_date || !Number.isFinite(amount) || amount < 0) {
+      res.status(400).json({ error: 'Datos del viaje inválidos (revisá fecha y monto)' });
       return;
     }
-    const taxiId = body.taxi_id ? Number(body.taxi_id) : driver.rows[0].taxi_id;
+    // El taxi del viaje: el de la jornada de ese día, si hay una;
+    // si no, el taxi asignado al chofer. Los viajes ya no llevan horas ni km.
+    let taxiId = body.taxi_id ? Number(body.taxi_id) : null;
+    if (!taxiId) {
+      const shift = await pool.query(
+        'SELECT taxi_id FROM day_shifts WHERE driver_id = $1 AND shift_date = $2',
+        [driverId, body.trip_date]
+      );
+      taxiId = shift.rows[0] ? shift.rows[0].taxi_id : driver.rows[0].taxi_id;
+    }
     const inserted = await pool.query(
       `INSERT INTO trips (driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [driverId, taxiId, body.trip_date, body.entry_time, entryKm, body.exit_time, exitKm, amount, driver.rows[0].commission_pct]
+       VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, $4, $5) RETURNING *`,
+      [driverId, taxiId, body.trip_date, amount, driver.rows[0].commission_pct]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [inserted.rows[0].id]);
     res.status(201).json(withSplit(full.rows[0]));
@@ -117,17 +123,14 @@ module.exports = async function handler(req, res) {
       return;
     }
     const amount = toNumber(body.amount, NaN);
-    const entryKm = toNumber(body.entry_km, NaN);
-    const exitKm = toNumber(body.exit_km, NaN);
-    if (!body.trip_date || !body.entry_time || !body.exit_time || !Number.isFinite(amount) || amount < 0 ||
-        !Number.isFinite(entryKm) || entryKm < 0 || !Number.isFinite(exitKm) || exitKm < entryKm) {
+    if (!body.trip_date || !Number.isFinite(amount) || amount < 0) {
       res.status(400).json({ error: 'Datos del viaje inválidos' });
       return;
     }
+    const taxiId = body.taxi_id ? Number(body.taxi_id) : current.rows[0].taxi_id;
     const updated = await pool.query(
-      `UPDATE trips SET trip_date = $1, entry_time = $2, entry_km = $3, exit_time = $4,
-       exit_km = $5, amount = $6 WHERE id = $7 RETURNING *`,
-      [body.trip_date, body.entry_time, entryKm, body.exit_time, exitKm, amount, id]
+      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3 WHERE id = $4 RETURNING *`,
+      [body.trip_date, amount, taxiId, id]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [updated.rows[0].id]);
     res.status(200).json(withSplit(full.rows[0]));

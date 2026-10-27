@@ -1,5 +1,5 @@
 // /api/taxis — taxis.
-// GET: admin ve todos; chofer ve solo su taxi asignado.
+// GET: admin ve todos; chofer ve los taxis activos (elige uno por día en su jornada).
 // POST, PUT, DELETE: solo admin.
 
 const { getPool, requireAuth, readBody, methodNotAllowed } = require('./_db');
@@ -15,11 +15,7 @@ module.exports = async function handler(req, res) {
       const result = await pool.query('SELECT * FROM taxis ORDER BY identifier');
       res.status(200).json(result.rows);
     } else {
-      if (!user.taxi_id) {
-        res.status(200).json([]);
-        return;
-      }
-      const result = await pool.query('SELECT * FROM taxis WHERE id = $1', [user.taxi_id]);
+      const result = await pool.query('SELECT * FROM taxis WHERE active = TRUE ORDER BY identifier');
       res.status(200).json(result.rows);
     }
     return;

@@ -39,9 +39,19 @@ module.exports = async function handler(req, res) {
       'SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE driver_id = $1 AND expense_date = $2',
       [driver.id, date]
     );
+    const shift = await pool.query(
+      `SELECT s.*, t.identifier AS taxi_identifier FROM day_shifts s
+       LEFT JOIN taxis t ON t.id = s.taxi_id
+       WHERE s.driver_id = $1 AND s.shift_date = $2`,
+      [driver.id, date]
+    );
     const total = round2(trips.rows[0].total);
     const keeps = round2(trips.rows[0].keeps);
     const expenseTotal = round2(expenses.rows[0].total);
+    const sh = shift.rows[0] || null;
+    const kmDriven = sh && sh.entry_km !== null && sh.exit_km !== null
+      ? round2(Number(sh.exit_km) - Number(sh.entry_km))
+      : null;
     closes.push({
       driver_id: driver.id,
       driver_name: driver.name,
@@ -52,6 +62,12 @@ module.exports = async function handler(req, res) {
       expenses: expenseTotal,
       owner_share_gross: round2(total - keeps),
       handover_to_owner: round2(total - keeps - expenseTotal),
+      shift_taxi: sh ? sh.taxi_identifier : null,
+      shift_entry_time: sh ? sh.entry_time : null,
+      shift_entry_km: sh ? sh.entry_km : null,
+      shift_exit_time: sh ? sh.exit_time : null,
+      shift_exit_km: sh ? sh.exit_km : null,
+      km_driven: kmDriven,
     });
   }
 

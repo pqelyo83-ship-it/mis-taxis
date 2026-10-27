@@ -103,6 +103,7 @@
 
   function driverTabs() {
     return [
+      { id: 'day', label: 'Mi día' },
       { id: 'trips', label: 'Mis viajes' },
       { id: 'new-trip', label: 'Nuevo viaje' },
       { id: 'expenses', label: 'Gastos' },
@@ -140,6 +141,7 @@
   function renderTab() {
     contentEl.innerHTML = '<p class="muted">Cargando…</p>';
     var renderers = {
+      'day': renderDay,
       'trips': renderTrips,
       'new-trip': renderNewTrip,
       'expenses': renderExpenses,
@@ -153,15 +155,79 @@
     if (fn) fn().catch(function (err) { contentEl.innerHTML = '<p class="error">' + esc(err.message) + '</p>'; });
   }
 
+  // ---------- Mi día (jornada) ----------
+
+  async function renderDay() {
+    var taxis = [];
+    try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
+    var taxiOptions = taxis.map(function (t) {
+      return '<option value="' + t.id + '"' + (user.taxi_id === t.id ? ' selected' : '') + '>' + esc(t.identifier) + '</option>';
+    }).join('');
+    contentEl.innerHTML = '<h2>Mi día</h2><form id="day-form" class="row">' +
+      '<label>Fecha <input name="shift_date" type="date" value="' + todayLocal() + '" required></label>' +
+      '<label>Taxi del día <select name="taxi_id">' + taxiOptions + '</select></label>' +
+      '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
+      '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
+      '<label>Hora de salida <input name="exit_time" type="time"></label>' +
+      '<label>Km de salida <input name="exit_km" type="number" step="0.01" min="0"></label>' +
+      '<button type="submit">Guardar día</button></form><div id="day-result"></div>' +
+      '<p class="muted">Al arrancar el día cargá entrada y taxi; al terminar, completá la salida. Después, cada viaje lleva solo el monto.</p>';
+    var form = document.getElementById('day-form');
+    var result = document.getElementById('day-result');
+    async function load() {
+      try {
+        var shifts = await api('/api/shifts?date=' + encodeURIComponent(form.shift_date.value));
+        var s = shifts && shifts[0] ? shifts[0] : null;
+        if (s) {
+          form.taxi_id.value = s.taxi_id || '';
+          form.entry_time.value = s.entry_time || '';
+          form.entry_km.value = s.entry_km !== null ? s.entry_km : '';
+          form.exit_time.value = s.exit_time || '';
+          form.exit_km.value = s.exit_km !== null ? s.exit_km : '';
+          result.innerHTML = s.km_driven !== null && s.km_driven !== undefined
+            ? '<p>Km recorridos ese día: <strong>' + esc(s.km_driven) + ' km</strong></p>'
+            : '<p class="muted">Jornada cargada, falta la salida.</p>';
+        } else {
+          form.entry_time.value = '';
+          form.entry_km.value = '';
+          form.exit_time.value = '';
+          form.exit_km.value = '';
+          result.innerHTML = '<p class="muted">Sin jornada para esa fecha.</p>';
+        }
+      } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
+    }
+    form.shift_date.addEventListener('change', load);
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      try {
+        var saved = await api('/api/shifts', 'POST', {
+          shift_date: form.shift_date.value,
+          taxi_id: form.taxi_id.value,
+          entry_time: form.entry_time.value,
+          entry_km: form.entry_km.value,
+          exit_time: form.exit_time.value || null,
+          exit_km: form.exit_km.value === '' ? null : form.exit_km.value,
+        });
+        showMessage('Día guardado.', 'ok');
+        if (saved.km_driven !== null && saved.km_driven !== undefined) {
+          result.innerHTML = '<p>Km recorridos ese día: <strong>' + esc(saved.km_driven) + ' km</strong></p>';
+        }
+      } catch (e) { showMessage(e.message, 'error'); }
+    });
+    load();
+  }
+
   // ---------- Viajes ----------
 
   async function renderTrips() {
     var trips = await api('/api/trips');
     var title = user.role === 'admin' ? 'Todos los viajes' : 'Mis viajes';
     var rows = trips.map(function (t) {
+      var shiftLine = t.entry_time
+        ? '<p>Entrada: ' + esc(t.entry_time) + ' · ' + esc(t.entry_km) + ' km — Salida: ' + esc(t.exit_time) + ' · ' + esc(t.exit_km) + ' km</p>'
+        : '';
       return '<div class="card"><p><strong>' + esc(t.trip_date) + '</strong> · ' + esc(t.driver_name || user.name) +
-        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + '</p>' +
-        '<p>Entrada: ' + esc(t.entry_time) + ' · ' + esc(t.entry_km) + ' km — Salida: ' + esc(t.exit_time) + ' · ' + esc(t.exit_km) + ' km</p>' +
+        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + '</p>' + shiftLine +
         '<p>Monto: ' + money(t.amount) + ' · %: ' + esc(t.pct_snapshot) + '% · Te quedás: ' + money(t.driver_keeps) + ' · Dueño: ' + money(t.owner_share) + '</p>' +
         '<button type="button" class="danger small" data-del-trip="' + t.id + '">Borrar</button></div>';
     }).join('');
@@ -181,13 +247,9 @@
   function tripFormHtml() {
     return '<h2>Nuevo viaje</h2><form id="trip-form">' +
       '<label>Fecha <input name="trip_date" type="date" value="' + todayLocal() + '" required></label>' +
-      '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
-      '<label>Kilometraje de entrada <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
-      '<label>Hora de salida <input name="exit_time" type="time" required></label>' +
-      '<label>Kilometraje de salida <input name="exit_km" type="number" step="0.01" min="0" required></label>' +
       '<label>Monto del viaje (USD) <input name="amount" type="number" step="0.01" min="0" required></label>' +
       '<button type="submit">Guardar viaje</button></form>' +
-      '<p class="muted">El % que se aplica es el que te puso el administrador. Si cambia después, tus viajes viejos no cambian.</p>';
+      '<p class="muted">Solo el monto: la hora y el kilometraje van en "Mi día". El % que se aplica es el que te puso el administrador. Si cambia después, tus viajes viejos no cambian.</p>';
   }
 
   async function renderNewTrip() {
@@ -197,10 +259,6 @@
       var f = ev.target;
       var body = {
         trip_date: f.trip_date.value,
-        entry_time: f.entry_time.value,
-        entry_km: f.entry_km.value,
-        exit_time: f.exit_time.value,
-        exit_km: f.exit_km.value,
         amount: f.amount.value,
       };
       try {
@@ -265,8 +323,14 @@
 
   function closeCardsHtml(closes) {
     return closes.map(function (c) {
+      var shiftLine = c.shift_taxi
+        ? '<p>Taxi del día: ' + esc(c.shift_taxi) +
+          (c.shift_entry_time ? ' · Entrada: ' + esc(c.shift_entry_time) + ' · ' + esc(c.shift_entry_km) + ' km' : '') +
+          (c.shift_exit_time ? ' · Salida: ' + esc(c.shift_exit_time) + ' · ' + esc(c.shift_exit_km) + ' km' : '') + '</p>' +
+          (c.km_driven !== null && c.km_driven !== undefined ? '<p>Km recorridos: ' + esc(c.km_driven) + ' km</p>' : '')
+        : '<p class="muted">Sin jornada cargada para ese día.</p>';
       return '<div class="card"><h3>' + esc(c.driver_name) + ' · ' + esc(c.date) + '</h3>' +
-        '<p>Viajes: ' + esc(c.trips_count) + '</p>' +
+        '<p>Viajes: ' + esc(c.trips_count) + '</p>' + shiftLine +
         '<p>Total recaudado</p><p class="big-number">' + money(c.total_collected) + '</p>' +
         '<p>Te quedás / Se queda el chofer: <strong>' + money(c.driver_keeps) + '</strong></p>' +
         '<p>Gastos del día: ' + money(c.expenses) + '</p>' +

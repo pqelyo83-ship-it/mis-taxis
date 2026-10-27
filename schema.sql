@@ -29,14 +29,14 @@ CREATE TABLE IF NOT EXISTS trips (
   driver_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   taxi_id INTEGER REFERENCES taxis(id) ON DELETE SET NULL,
   trip_date DATE NOT NULL,
-  entry_time TIME NOT NULL,
-  entry_km NUMERIC(10,2) NOT NULL CHECK (entry_km >= 0),
-  exit_time TIME NOT NULL,
-  exit_km NUMERIC(10,2) NOT NULL CHECK (exit_km >= 0),
+  entry_time TIME,
+  entry_km NUMERIC(10,2) CHECK (entry_km >= 0),
+  exit_time TIME,
+  exit_km NUMERIC(10,2) CHECK (exit_km >= 0),
   amount NUMERIC(10,2) NOT NULL CHECK (amount >= 0),
   pct_snapshot NUMERIC(5,2) NOT NULL CHECK (pct_snapshot >= 0 AND pct_snapshot <= 100),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CHECK (exit_km >= entry_km)
+  CHECK (exit_km IS NULL OR exit_km >= entry_km)
 );
 
 CREATE TABLE IF NOT EXISTS expenses (
@@ -52,3 +52,21 @@ CREATE TABLE IF NOT EXISTS expenses (
 CREATE INDEX IF NOT EXISTS idx_trips_driver_date ON trips(driver_id, trip_date);
 CREATE INDEX IF NOT EXISTS idx_expenses_driver_date ON expenses(driver_id, expense_date);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+-- Jornada del día (un registro por chofer y día): taxi del día, hora y km
+-- de entrada y hora y km de salida. Los viajes después solo llevan monto.
+CREATE TABLE IF NOT EXISTS day_shifts (
+  id SERIAL PRIMARY KEY,
+  driver_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  shift_date DATE NOT NULL,
+  taxi_id INTEGER REFERENCES taxis(id) ON DELETE SET NULL,
+  entry_time TIME NOT NULL,
+  entry_km NUMERIC(10,2) NOT NULL CHECK (entry_km >= 0),
+  exit_time TIME,
+  exit_km NUMERIC(10,2) CHECK (exit_km >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (driver_id, shift_date),
+  CHECK (exit_km IS NULL OR exit_km >= entry_km)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shifts_driver_date ON day_shifts(driver_id, shift_date);
