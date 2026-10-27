@@ -4,6 +4,8 @@
 // (el ingreso con email y PIN sigue disponible como alternativa para dueños).
 // Sin hashes ni PINes.
 // Requiere ?company_id= : sin empresa no se lista a nadie (aislamiento entre empresas).
+// Con ?name= devuelve SOLO ese usuario (para links personales tipo
+// ?company=CODIGO&user=NOMBRE): no se expone la lista completa.
 
 const { getPool, methodNotAllowed } = require('./_db');
 
@@ -18,6 +20,24 @@ module.exports = async function handler(req, res) {
   const company = await getPool().query('SELECT id FROM companies WHERE id = $1 AND active = TRUE', [companyId]);
   if (!company.rows[0]) {
     res.status(200).json([]);
+    return;
+  }
+  // Un solo usuario por nombre (link personal): sin lista completa.
+  if (req.query && req.query.name) {
+    const name = String(req.query.name || '').trim();
+    if (!name) {
+      res.status(400).json({ error: 'Falta el nombre' });
+      return;
+    }
+    const one = await getPool().query(
+      "SELECT id, name, role FROM users WHERE active = TRUE AND company_id = $1 AND pin_hash IS NOT NULL AND LOWER(name) = LOWER($2) ORDER BY id LIMIT 1",
+      [companyId, name]
+    );
+    if (!one.rows[0]) {
+      res.status(404).json({ error: 'Usuario no encontrado' });
+      return;
+    }
+    res.status(200).json(one.rows[0]);
     return;
   }
   const result = await getPool().query(

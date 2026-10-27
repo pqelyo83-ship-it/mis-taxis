@@ -9,6 +9,9 @@
 
   var token = localStorage.getItem('mt_token') || '';
   var user = null;
+  // Ingreso personal (?company=CODIGO&user=NOMBRE): empresa y usuario fijos
+  // cuando el link trae un usuario; null en el ingreso normal.
+  var fixedLogin = null;
   try { user = JSON.parse(localStorage.getItem('mt_user') || 'null'); } catch (e) { user = null; }
 
   var loginView = document.getElementById('login-view');
@@ -108,6 +111,15 @@
     loginView.classList.remove('hidden');
     appView.classList.add('hidden');
     userBar.classList.add('hidden');
+    // Estado base del ingreso (por si una sesión anterior dejó algo oculto).
+    fixedLogin = null;
+    document.getElementById('company-select-block').classList.remove('hidden');
+    document.getElementById('fixed-company-name').classList.add('hidden');
+    document.getElementById('fixed-user-name').classList.add('hidden');
+    document.querySelector('label[for="user-select"]').classList.remove('hidden');
+    document.getElementById('user-select').classList.remove('hidden');
+    document.getElementById('owner-login-btn-row').classList.remove('hidden');
+    document.getElementById('pin-login-intro').textContent = 'Elegí tu nombre y escribí tu PIN (dueños y choferes entran igual).';
     // El link de un dueño (?login=owner) muestra SOLO el ingreso con email
     // y PIN: no se carga ni se muestra la lista de empresas, así el dueño
     // no ve los nombres de las otras empresas.
@@ -116,9 +128,15 @@
     document.getElementById('pin-login-block').classList.toggle('hidden', ownerOnly);
     document.getElementById('owner-login-block').classList.toggle('hidden', !ownerOnly);
     if (ownerOnly) return;
+    // Link personal (?company=CODIGO&user=NOMBRE): muestra SOLO ese usuario
+    // y el campo de PIN. No se carga ni se muestra ninguna lista: solo ese
+    // usuario puede entrar por acá. Si el usuario no existe, vuelve al
+    // ingreso con empresa fija.
+    var fixedUser = params.get('user');
+    var fixedCode = params.get('company');
+    if (fixedUser && fixedCode) { loadFixedUser(fixedCode, fixedUser); return; }
     // Si el link ya trae la empresa (?company=CODIGO), no se muestra ni se
     // carga la lista de empresas: se fija esa empresa y punto.
-    var fixedCode = params.get('company');
     if (fixedCode) { loadFixedCompany(fixedCode); return; }
     loadCompanies();
   }
@@ -172,6 +190,32 @@
       block.classList.remove('hidden');
       fixedEl.classList.add('hidden');
       loadCompanies();
+    }
+  }
+
+  // Ingreso personal (?company=CODIGO&user=NOMBRE): muestra SOLO ese usuario
+  // y el PIN. No se carga la lista de empresas ni la de nombres: solo ese
+  // usuario puede entrar por este link. Si algo falla, vuelve al ingreso
+  // con empresa fija.
+  async function loadFixedUser(code, userName) {
+    try {
+      var c = await api('/api/company?code=' + encodeURIComponent(code));
+      if (!c || !c.id) throw new Error('sin empresa');
+      var u = await api('/api/login-users?company_id=' + encodeURIComponent(c.id) + '&name=' + encodeURIComponent(userName));
+      if (!u || !u.id) throw new Error('sin usuario');
+      fixedLogin = { company_id: c.id, user_id: u.id };
+      document.getElementById('company-select-block').classList.add('hidden');
+      document.getElementById('fixed-company-name').classList.add('hidden');
+      document.querySelector('label[for="user-select"]').classList.add('hidden');
+      document.getElementById('user-select').classList.add('hidden');
+      document.getElementById('owner-login-btn-row').classList.add('hidden');
+      var fixedUserEl = document.getElementById('fixed-user-name');
+      fixedUserEl.innerHTML = 'Usuario: <strong>' + esc(u.name) + '</strong>';
+      fixedUserEl.classList.remove('hidden');
+      document.getElementById('pin-login-intro').textContent = 'Escribí tu PIN para entrar.';
+    } catch (e) {
+      fixedLogin = null;
+      loadFixedCompany(code);
     }
   }
 
@@ -1268,8 +1312,8 @@
   document.getElementById('login-form').addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var pin = document.getElementById('pin-input').value;
-    var userId = document.getElementById('user-select').value;
-    var companyId = document.getElementById('company-select').value;
+    var userId = fixedLogin ? fixedLogin.user_id : document.getElementById('user-select').value;
+    var companyId = fixedLogin ? fixedLogin.company_id : document.getElementById('company-select').value;
     loginError.classList.add('hidden');
     if (!companyId || !userId) return;
     try {

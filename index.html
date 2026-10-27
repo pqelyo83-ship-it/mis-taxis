@@ -19,13 +19,14 @@
   <section id="login-view">
     <div id="pin-login-block">
       <h2>Ingresar con PIN</h2>
-      <p>Elegí tu nombre y escribí tu PIN (dueños y choferes entran igual).</p>
+      <p id="pin-login-intro">Elegí tu nombre y escribí tu PIN (dueños y choferes entran igual).</p>
       <form id="login-form">
         <div id="company-select-block">
           <label for="company-select">Empresa</label>
           <select id="company-select" required></select>
         </div>
         <p id="fixed-company-name" class="hidden"></p>
+        <p id="fixed-user-name" class="hidden"></p>
         <label for="user-select">Quién sos</label>
         <select id="user-select" required></select>
         <label for="pin-input">PIN</label>
@@ -33,7 +34,7 @@
         <button type="submit">Entrar</button>
       </form>
       <p id="login-error" class="error hidden"></p>
-      <p><button id="show-owner-login-btn" type="button">Soy dueño: entrar con email y PIN</button></p>
+      <p id="owner-login-btn-row"><button id="show-owner-login-btn" type="button">Soy dueño: entrar con email y PIN</button></p>
     </div>
     <div id="owner-login-block" class="hidden">
       <h2>Ingresar como dueño</h2>
