@@ -3,10 +3,10 @@
 // Dueños y choferes entran igual: eligen su nombre y escriben su PIN
 // (el ingreso con email y PIN sigue disponible como alternativa para dueños).
 // Sin hashes ni PINes.
-// Las cuentas de manejo de la app (superadmin) NO aparecen en la lista,
-// salvo el primer superadmin de la empresa (su admin original): así una
-// cuenta de manejo agregada después (p. ej. AdrianP) no se muestra a
-// choferes ni dueños, y solo entra por su link personal (?name=, abajo).
+// Las cuentas de manejo de la app (superadmin) NO aparecen en la lista:
+// el único superadmin es el encargado de la plataforma y solo entra por
+// su link personal (?name=, abajo). Los dueños de empresa son 'admin' y
+// sí aparecen en la lista de su empresa.
 // Requiere ?company_id= : sin empresa no se lista a nadie (aislamiento entre empresas).
 // Con ?name= devuelve SOLO ese usuario (para links personales tipo
 // ?company=CODIGO&user=NOMBRE): no se expone la lista completa.
@@ -47,7 +47,7 @@ module.exports = async function handler(req, res) {
   const result = await getPool().query(
     `SELECT id, name, role FROM users
      WHERE active = TRUE AND company_id = $1 AND pin_hash IS NOT NULL
-     AND (role <> 'superadmin' OR id = (SELECT MIN(id) FROM users u2 WHERE u2.company_id = $1 AND u2.role = 'superadmin'))
+     AND role <> 'superadmin'
      ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, name`,
     [companyId]
   );
