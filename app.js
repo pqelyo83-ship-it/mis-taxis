@@ -64,6 +64,25 @@
     loginView.classList.remove('hidden');
     appView.classList.add('hidden');
     userBar.classList.add('hidden');
+    loadLoginUsers();
+  }
+
+  // Carga los nombres para la pantalla de ingreso (sin PINes ni hashes).
+  async function loadLoginUsers() {
+    var select = document.getElementById('user-select');
+    if (!select) return;
+    try {
+      var users = await api('/api/login-users');
+      if (!users || !users.length) {
+        select.innerHTML = '<option value="">Sin usuarios activos</option>';
+        return;
+      }
+      select.innerHTML = users.map(function (u) {
+        return '<option value="' + u.id + '">' + esc(u.name) + (u.role === 'admin' ? ' (admin)' : '') + '</option>';
+      }).join('');
+    } catch (e) {
+      select.innerHTML = '<option value="">No se pudo cargar la lista</option>';
+    }
   }
 
   function showApp() {
@@ -440,9 +459,10 @@
   document.getElementById('login-form').addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var pin = document.getElementById('pin-input').value;
+    var userId = document.getElementById('user-select').value;
     loginError.classList.add('hidden');
     try {
-      var data = await api('/api/auth', 'POST', { pin: pin });
+      var data = await api('/api/auth', 'POST', { user_id: Number(userId), pin: pin });
       token = data.token;
       user = data.user;
       localStorage.setItem('mt_token', token);

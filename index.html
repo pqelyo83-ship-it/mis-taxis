@@ -18,8 +18,10 @@
 <main>
   <section id="login-view">
     <h2>Ingresar con PIN</h2>
-    <p>Escribí tu PIN para entrar. No hace falta email ni contraseña.</p>
+    <p>Seleccioná tu nombre y escribí tu PIN. No hace falta email ni contraseña.</p>
     <form id="login-form">
+      <label for="user-select">Quién sos</label>
+      <select id="user-select" required></select>
       <label for="pin-input">PIN</label>
       <input id="pin-input" type="password" inputmode="numeric" autocomplete="off" placeholder="Tu PIN" required>
       <button type="submit">Entrar</button>

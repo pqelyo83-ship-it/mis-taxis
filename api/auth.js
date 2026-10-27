@@ -12,19 +12,44 @@ module.exports = async function handler(req, res) {
     res.status(400).json({ error: 'Falta el PIN' });
     return;
   }
+  // Si viene user_id, el PIN se verifica solo contra ese usuario
+  // (así dos usuarios nunca se confunden aunque compartan PIN).
+  // Sin user_id se mantiene el comportamiento anterior: primer coincidente.
+  const userId = body.user_id !== undefined ? Number(body.user_id)
+    : (body.userId !== undefined ? Number(body.userId) : null);
 
-  const result = await getPool().query(
-    'SELECT id, name, role, phone, taxi_id, commission_pct, pin_hash, pin_salt, active FROM users'
-  );
   let match = null;
-  for (const row of result.rows) {
-    if (!row.active) continue;
+  if (userId) {
+    const result = await getPool().query(
+      'SELECT id, name, role, phone, taxi_id, commission_pct, pin_hash, pin_salt, active FROM users WHERE id = $1',
+      [userId]
+    );
+    const row = result.rows[0];
+    if (!row || !row.active) {
+      res.status(401).json({ error: 'PIN incorrecto' });
+      return;
+    }
     const digest = hashPin(pin, row.pin_salt);
     const a = Buffer.from(digest);
     const b = Buffer.from(row.pin_hash);
-    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-      match = row;
-      break;
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      res.status(401).json({ error: 'PIN incorrecto' });
+      return;
+    }
+    match = row;
+  } else {
+    const result = await getPool().query(
+      'SELECT id, name, role, phone, taxi_id, commission_pct, pin_hash, pin_salt, active FROM users'
+    );
+    for (const row of result.rows) {
+      if (!row.active) continue;
+      const digest = hashPin(pin, row.pin_salt);
+      const a = Buffer.from(digest);
+      const b = Buffer.from(row.pin_hash);
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+        match = row;
+        break;
+      }
     }
   }
   if (!match) {
