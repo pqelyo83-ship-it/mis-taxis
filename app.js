@@ -951,7 +951,7 @@
     contentEl.innerHTML = '<h2>Taxis</h2><form id="taxi-form">' +
       '<input type="hidden" name="id">' +
       '<label>Identificador <input name="identifier" type="text" placeholder="Ej: TAXI-01" required></label>' +
-      '<label>Patente <input name="plate" type="text" required></label>' +
+      '<label>Patente (opcional) <input name="plate" type="text"></label>' +
       '<label>Modelo <input name="model" type="text"></label>' +
       '<label>Año <input name="year" type="number" min="1980" max="2100"></label>' +
       '<label><input name="active" type="checkbox" checked> Activo</label>' +

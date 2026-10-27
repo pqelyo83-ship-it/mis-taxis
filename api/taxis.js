@@ -30,9 +30,10 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'POST') {
     const identifier = String(body.identifier || '').trim();
+    // La patente es opcional: el dueno puede dar de alta el taxi y agregarla despues.
     const plate = String(body.plate || '').trim();
-    if (!identifier || !plate) {
-      res.status(400).json({ error: 'Faltan identificador o patente' });
+    if (!identifier) {
+      res.status(400).json({ error: 'Falta el identificador' });
       return;
     }
     const result = await pool.query(
