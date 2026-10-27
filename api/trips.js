@@ -159,8 +159,19 @@ module.exports = async function handler(req, res) {
       params.push(Number(req.query.taxi_id));
       conditions.push('tr.taxi_id = $' + params.length);
     }
+    if (req.query && req.query.from && req.query.to) {
+      params.push(String(req.query.from));
+      var fromIdx = params.length;
+      params.push(String(req.query.to));
+      conditions.push('tr.trip_date BETWEEN $' + fromIdx + ' AND $' + params.length);
+    }
+    var limitSql = '';
+    if (req.query && req.query.limit === 'all') limitSql = '';
+    else if (req.query && req.query.limit) limitSql = ' LIMIT ' + Math.min(Math.max(Number(req.query.limit) || 100, 1), 1000);
+    else if (req.query && (req.query.from || req.query.to)) limitSql = '';
+    else limitSql = ' LIMIT 100';
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-    const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY tr.trip_date DESC, tr.entry_time DESC', params);
+    const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY tr.trip_date DESC, tr.entry_time DESC' + limitSql, params);
     res.status(200).json(result.rows.map(withSplit));
     return;
   }

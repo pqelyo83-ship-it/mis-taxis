@@ -25,7 +25,10 @@
   var currentTab = null;
   var tripsFilter = { date: '', taxi_id: '', driver_id: '' };
   var expensesFilter = { date: '', taxi_id: '', driver_id: '' };
+  var tripsShowAll = false;
+  var expensesShowAll = false;
   var perfDays = 30;
+  var inicioDate = '';
 
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
@@ -293,6 +296,7 @@
 
   function driverTabs() {
     return [
+      { id: 'inicio', label: 'Inicio' },
       { id: 'day', label: 'Mi día' },
       { id: 'trips', label: 'Mis viajes' },
       { id: 'new-trip', label: 'Nuevo viaje' },
@@ -337,6 +341,7 @@
   function renderTab() {
     contentEl.innerHTML = '<p class="muted">Cargando…</p>';
     var renderers = {
+      'inicio': renderInicio,
       'day': renderDay,
       'trips': renderTrips,
       'new-trip': renderNewTrip,
@@ -354,6 +359,87 @@
     };
     var fn = renderers[currentTab];
     if (fn) fn().catch(function (err) { contentEl.innerHTML = '<p class="error">' + esc(err.message) + '</p>'; });
+  }
+
+  // ---------- Inicio del chofer ----------
+  // Pantalla principal del chofer: su turno en curso, lo que va facturando,
+  // lo que le queda y lo que debe entregar, un visor para ver cualquier día
+  // pasado y sus últimos 14 días en gráficos. Un toque para ir a cada acción:
+  // nada de formularios para ver. (day-close ya limita al chofer a su propio
+  // cierre: el chofer nunca ve los números de otro.)
+
+  async function renderInicio() {
+    var effDate = inicioDate || todayLocal();
+    var closes = [];
+    try { closes = await api('/api/day-close?date=' + encodeURIComponent(effDate)); } catch (e) { closes = []; }
+    var mine = closes.length ? closes[0] : null;
+    var dayCard = '';
+    if (!mine || (!mine.shift_taxi && !mine.trips_count && !mine.expenses)) {
+      dayCard = '<div class="card"><h3>' + esc(effDate) + '</h3><p class="muted">Sin actividad ese día.</p>' +
+        (effDate === todayLocal() ? '<p><button type="button" data-goto="day">Empezar el día</button></p>' : '') + '</div>';
+    } else {
+      var shiftLine = mine.shift_taxi
+        ? '<p>Taxi: ' + esc(mine.shift_taxi) +
+          (mine.shift_entry_time ? ' · Entrada: ' + esc(mine.shift_entry_time) + ' · ' + esc(mine.shift_entry_km) + ' km' : '') +
+          (mine.shift_exit_time ? ' · Salida: ' + esc(mine.shift_exit_time) + ' · ' + esc(mine.shift_exit_km) + ' km' : ' · Jornada abierta') + '</p>' +
+          (mine.km_driven !== null && mine.km_driven !== undefined ? '<p>Km recorridos: ' + esc(mine.km_driven) + ' km</p>' : '')
+        : '<p class="muted">Sin jornada cargada para ese día.</p>';
+      dayCard = '<div class="card"><h3>' + esc(effDate) + '</h3>' + shiftLine +
+        '<p>Viajes: ' + esc(mine.trips_count) + '</p>' +
+        '<p>Total facturado</p><p class="big-number">' + money(mine.total_collected) + '</p>' +
+        '<p>Te quedás: <strong>' + money(mine.driver_keeps) + '</strong></p>' +
+        '<p>Gastos: ' + money(mine.expenses) + '</p>' +
+        '<p>Debés entregar: <strong>' + money(mine.handover_to_owner) + '</strong></p></div>';
+    }
+    var chartHtml = '';
+    try {
+      var from14 = daysAgoLocal(13);
+      var to14 = todayLocal();
+      var trips14 = await api('/api/trips?from=' + encodeURIComponent(from14) + '&to=' + encodeURIComponent(to14));
+      var exp14 = await api('/api/expenses?from=' + encodeURIComponent(from14) + '&to=' + encodeURIComponent(to14));
+      var byDate = {};
+      trips14.forEach(function (t) {
+        byDate[t.trip_date] = byDate[t.trip_date] || { facturado: 0, gastos: 0 };
+        byDate[t.trip_date].facturado += Number(t.amount);
+      });
+      exp14.forEach(function (g) {
+        byDate[g.expense_date] = byDate[g.expense_date] || { facturado: 0, gastos: 0 };
+        byDate[g.expense_date].gastos += Number(g.amount);
+      });
+      var dates = Object.keys(byDate).sort().reverse();
+      if (dates.length) {
+        var maxV = 0;
+        dates.forEach(function (d) { maxV = Math.max(maxV, byDate[d].facturado, byDate[d].gastos); });
+        chartHtml = '<h3>Últimos 14 días</h3>' + dates.map(function (d) {
+          var pf = maxV > 0 ? Math.round(byDate[d].facturado / maxV * 100) : 0;
+          var pg = maxV > 0 ? Math.round(byDate[d].gastos / maxV * 100) : 0;
+          return '<div class="card"><p><strong>' + esc(d) + '</strong> · Facturado: ' + money(byDate[d].facturado) + ' · Gastos: ' + money(byDate[d].gastos) + '</p>' +
+            '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pf + '%"></div></div>' +
+            '<div class="perf-bar"><div class="perf-bar-fill-expense" style="width: ' + pg + '%"></div></div></div>';
+        }).join('');
+      }
+    } catch (e) { /* sin gráfico */ }
+    contentEl.innerHTML = '<h2>Inicio</h2>' +
+      '<form id="inicio-date-form" class="row"><label>Ver día <input name="date" type="date" value="' + esc(effDate) + '"></label><button type="submit">Ver</button></form>' +
+      dayCard + chartHtml +
+      '<h3>Ir a</h3><div class="row">' +
+      '<button type="button" data-goto="day">Mi día</button>' +
+      '<button type="button" data-goto="new-trip">Nuevo viaje</button>' +
+      '<button type="button" data-goto="expenses">Gastos</button>' +
+      '<button type="button" data-goto="close">Cierre del día</button>' +
+      '<button type="button" data-goto="pin">Mi PIN</button></div>';
+    var dateForm = document.getElementById('inicio-date-form');
+    if (dateForm) dateForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      inicioDate = dateForm.date.value || '';
+      renderInicio();
+    });
+    contentEl.querySelectorAll('[data-goto]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        currentTab = btn.getAttribute('data-goto');
+        buildTabs();
+      });
+    });
   }
 
   // ---------- Mi día (jornada) ----------
@@ -501,6 +587,7 @@
     if (tripsFilter.date) tripsQuery.push('date=' + encodeURIComponent(tripsFilter.date));
     if (tripsFilter.taxi_id) tripsQuery.push('taxi_id=' + encodeURIComponent(tripsFilter.taxi_id));
     if (tripsFilter.driver_id) tripsQuery.push('driver_id=' + encodeURIComponent(tripsFilter.driver_id));
+    if (tripsShowAll) tripsQuery.push('limit=all');
     var trips = await api('/api/trips' + (tripsQuery.length ? '?' + tripsQuery.join('&') : ''));
     var methods = [];
     try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
@@ -535,7 +622,10 @@
       '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
       driverFilterHtml +
       '<button type="button" id="trips-filter-clear">Limpiar filtros</button></form>';
-    contentEl.innerHTML = '<h2>' + title + '</h2>' + filterHtml + (rows || '<p class="muted">Todavía no hay viajes.</p>');
+    var limitRow = tripsShowAll
+      ? '<p><button type="button" id="trips-show-less">Ver últimos 100</button></p>'
+      : '<p class="muted">Mostrando los últimos 100 viajes. <button type="button" id="trips-show-all">Ver todos</button></p>';
+    contentEl.innerHTML = '<h2>' + title + '</h2>' + filterHtml + limitRow + (rows || '<p class="muted">Todavía no hay viajes.</p>');
     var filterForm = document.getElementById('trips-filter');
     if (filterForm) {
       filterForm.addEventListener('change', function () {
@@ -548,9 +638,14 @@
       var clearBtn = document.getElementById('trips-filter-clear');
       if (clearBtn) clearBtn.addEventListener('click', function () {
         tripsFilter.date = ''; tripsFilter.taxi_id = ''; tripsFilter.driver_id = '';
+        tripsShowAll = false;
         renderTrips();
       });
     }
+    var showAllBtn = document.getElementById('trips-show-all');
+    if (showAllBtn) showAllBtn.addEventListener('click', function () { tripsShowAll = true; renderTrips(); });
+    var showLessBtn = document.getElementById('trips-show-less');
+    if (showLessBtn) showLessBtn.addEventListener('click', function () { tripsShowAll = false; renderTrips(); });
     contentEl.querySelectorAll('[data-edit-trip]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var t = trips.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-trip'); });
@@ -707,6 +802,7 @@
     if (expensesFilter.date) expensesQuery.push('date=' + encodeURIComponent(expensesFilter.date));
     if (expensesFilter.taxi_id) expensesQuery.push('taxi_id=' + encodeURIComponent(expensesFilter.taxi_id));
     if (expensesFilter.driver_id) expensesQuery.push('driver_id=' + encodeURIComponent(expensesFilter.driver_id));
+    if (expensesShowAll) expensesQuery.push('limit=all');
     var expenses = await api('/api/expenses' + (expensesQuery.length ? '?' + expensesQuery.join('&') : ''));
     var taxis = [];
     try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
@@ -746,7 +842,10 @@
       '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
       driverFilterHtml +
       '<button type="button" id="expenses-filter-clear">Limpiar filtros</button></form>';
-    contentEl.innerHTML = '<h2>' + title + '</h2>' + formHtml + filterHtml + '<h3>Lista</h3>' + (rows || '<p class="muted">Todavía no hay gastos.</p>');
+    var expensesLimitRow = expensesShowAll
+      ? '<p><button type="button" id="expenses-show-less">Ver últimos 100</button></p>'
+      : '<p class="muted">Mostrando los últimos 100 gastos. <button type="button" id="expenses-show-all">Ver todos</button></p>';
+    contentEl.innerHTML = '<h2>' + title + '</h2>' + formHtml + filterHtml + expensesLimitRow + '<h3>Lista</h3>' + (rows || '<p class="muted">Todavía no hay gastos.</p>');
     var filterForm = document.getElementById('expenses-filter');
     if (filterForm) {
       filterForm.addEventListener('change', function () {
@@ -759,9 +858,14 @@
       var clearBtn = document.getElementById('expenses-filter-clear');
       if (clearBtn) clearBtn.addEventListener('click', function () {
         expensesFilter.date = ''; expensesFilter.taxi_id = ''; expensesFilter.driver_id = '';
+        expensesShowAll = false;
         renderExpenses();
       });
     }
+    var expShowAllBtn = document.getElementById('expenses-show-all');
+    if (expShowAllBtn) expShowAllBtn.addEventListener('click', function () { expensesShowAll = true; renderExpenses(); });
+    var expShowLessBtn = document.getElementById('expenses-show-less');
+    if (expShowLessBtn) expShowLessBtn.addEventListener('click', function () { expensesShowAll = false; renderExpenses(); });
     var form = document.getElementById('expense-form');
     if (form) {
       form.addEventListener('submit', async function (ev) {
@@ -828,7 +932,8 @@
       else if (!c.shift_exit_time) note = ' · Jornada abierta';
       return '<div class="card"><p><strong>#' + (i + 1) + ' ' + esc(c.driver_name) + '</strong>' +
         (i === 0 && total > 0 ? ' · <strong>Mejor del día</strong>' : '') +
-        ' · ' + money(total) + ' · ' + esc(c.trips_count) + ' viajes · ' + perKm + note + '</p>' +
+        ' · ' + money(total) + ' · ' + esc(c.trips_count) + ' viajes · ' + perKm +
+        ' · Debe entregar: <strong>' + money(c.handover_to_owner) + '</strong>' + note + '</p>' +
         '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
     }).join('');
 
@@ -871,6 +976,32 @@
       }).join('') || '<p class="muted">Sin choferes.</p>';
     }
 
+    var chartHtml = '';
+    if (rep && rep.per_day) {
+      var expByDate = {};
+      try {
+        var expRange = await api('/api/expenses?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(today));
+        expRange.forEach(function (g) {
+          expByDate[g.expense_date] = (expByDate[g.expense_date] || 0) + Number(g.amount);
+        });
+      } catch (e) { /* sin gastos para el gráfico */ }
+      var chartDays = rep.per_day.slice(-14);
+      if (chartDays.length) {
+        var maxChart = 0;
+        chartDays.forEach(function (r) {
+          maxChart = Math.max(maxChart, Number(r.total), expByDate[r.date] || 0);
+        });
+        chartHtml = '<h3>Por día</h3>' + chartDays.map(function (r) {
+          var gastos = expByDate[r.date] || 0;
+          var pf = maxChart > 0 ? Math.round(Number(r.total) / maxChart * 100) : 0;
+          var pg = maxChart > 0 ? Math.round(gastos / maxChart * 100) : 0;
+          return '<div class="card"><p><strong>' + esc(r.date) + '</strong> · Facturado: ' + money(r.total) + ' · Gastos: ' + money(gastos) + '</p>' +
+            '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pf + '%"></div></div>' +
+            '<div class="perf-bar"><div class="perf-bar-fill-expense" style="width: ' + pg + '%"></div></div></div>';
+        }).join('');
+      }
+    }
+
     contentEl.innerHTML = '<h2>Resumen</h2>' +
       '<div class="card"><p class="muted">Hoy, ' + esc(today) + '</p>' +
       '<p class="big-number">' + money(totalHoy) + '</p>' +
@@ -881,6 +1012,7 @@
       '<div class="row"><button type="button" data-perf-days="7"' + (perfDays === 7 ? ' class="chip active"' : ' class="chip"') + '>7 días</button>' +
       '<button type="button" data-perf-days="30"' + (perfDays === 30 ? ' class="chip active"' : ' class="chip"') + '>30 días</button></div>' +
       perfCards +
+      chartHtml +
       '<h3>Ir a</h3><div class="row">' +
       '<button type="button" data-goto="closes">Cierres</button>' +
       '<button type="button" data-goto="report">Reportes</button>' +
@@ -901,6 +1033,118 @@
   }
 
   // ---------- Reportes (admin) ----------
+
+  // ---------- Descargar facturas (ZIP) ----------
+  // ZIP sin comprimir (STORE): las fotos ya son JPEG, comprimir no achica
+  // nada. Se arma en el navegador con las fotos que el admin ya puede ver
+  // (una por gasto con foto del período del reporte), sin archivo nuevo en
+  // el servidor y sin topar el límite de respuesta de las funciones.
+
+  function zipReceiptName(g) {
+    var driver = (g.driver_name || 'chofer').replace(/[^A-Za-z0-9._-]+/g, '_');
+    var type = (g.type || 'gasto').replace(/[^A-Za-z0-9._-]+/g, '_');
+    return g.expense_date + '_' + driver + '_' + type + '_' + g.id + '.jpg';
+  }
+
+  var crcTable = null;
+  function crc32(bytes) {
+    if (!crcTable) {
+      crcTable = new Uint32Array(256);
+      for (var n = 0; n < 256; n++) {
+        var c = n;
+        for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        crcTable[n] = c >>> 0;
+      }
+    }
+    var crc = 0xFFFFFFFF;
+    for (var i = 0; i < bytes.length; i++) crc = crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function buildZip(files) {
+    var parts = [];
+    var central = [];
+    var offset = 0;
+    files.forEach(function (f) {
+      var b64 = f.dataUrl.split(',')[1] || '';
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      var crc = crc32(bytes);
+      var nameBytes = new TextEncoder().encode(f.name);
+      var lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true);
+      lh.setUint16(4, 20, true);
+      lh.setUint16(6, 0x0800, true);
+      lh.setUint16(8, 0, true);
+      lh.setUint16(10, 0, true);
+      lh.setUint16(12, 0, true);
+      lh.setUint32(14, crc, true);
+      lh.setUint32(18, bytes.length, true);
+      lh.setUint32(22, bytes.length, true);
+      lh.setUint16(26, nameBytes.length, true);
+      lh.setUint16(28, 0, true);
+      parts.push(lh.buffer, nameBytes, bytes);
+      var ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true);
+      ch.setUint16(4, 20, true);
+      ch.setUint16(6, 20, true);
+      ch.setUint16(8, 0x0800, true);
+      ch.setUint16(10, 0, true);
+      ch.setUint16(12, 0, true);
+      ch.setUint16(14, 0, true);
+      ch.setUint32(16, crc, true);
+      ch.setUint32(20, bytes.length, true);
+      ch.setUint32(24, bytes.length, true);
+      ch.setUint16(28, nameBytes.length, true);
+      ch.setUint32(42, offset, true);
+      central.push(ch.buffer, nameBytes);
+      offset += 30 + nameBytes.length + bytes.length;
+    });
+    var centralSize = 0;
+    central.forEach(function (p) { centralSize += p.byteLength; });
+    var eocd = new DataView(new ArrayBuffer(22));
+    eocd.setUint32(0, 0x06054b50, true);
+    eocd.setUint16(8, files.length, true);
+    eocd.setUint16(10, files.length, true);
+    eocd.setUint32(12, centralSize, true);
+    eocd.setUint32(16, offset, true);
+    parts.push.apply(parts, central);
+    parts.push(eocd.buffer);
+    return new Blob(parts, { type: 'application/zip' });
+  }
+
+  async function downloadReceiptsZip() {
+    var form = document.getElementById('report-form');
+    var q = [];
+    q.push('from=' + encodeURIComponent(form.from.value));
+    q.push('to=' + encodeURIComponent(form.to.value));
+    if (form.driver_id.value) q.push('driver_id=' + encodeURIComponent(form.driver_id.value));
+    if (form.taxi_id.value) q.push('taxi_id=' + encodeURIComponent(form.taxi_id.value));
+    var list = [];
+    try { list = await api('/api/expenses?' + q.join('&')); } catch (e) { showMessage(e.message, 'error'); return; }
+    var withReceipt = list.filter(function (g) { return g.has_receipt; });
+    if (!withReceipt.length) { showMessage('Sin facturas con foto en ese período.', 'error'); return; }
+    showMessage('Descargando ' + withReceipt.length + ' factura(s)…', 'ok');
+    var files = [];
+    for (var i = 0; i < withReceipt.length; i++) {
+      try {
+        var data = await api('/api/expenses?receipt=' + withReceipt[i].id);
+        if (data && data.image) files.push({ name: zipReceiptName(withReceipt[i]), dataUrl: data.image });
+      } catch (e) { /* una foto que falla no frena el resto */ }
+    }
+    if (!files.length) { showMessage('No se pudo descargar ninguna factura.', 'error'); return; }
+    var blob = buildZip(files);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'facturas-' + form.from.value + '-' + form.to.value + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    showMessage('ZIP descargado con ' + files.length + ' factura(s).', 'ok');
+  }
 
   async function renderReport() {
     var drivers = [];
@@ -1009,6 +1253,7 @@
           '<p class="muted">El $/km se calcula solo sobre días con kilometraje cargado (jornada cerrada). Los días sin jornada no entran en el promedio.' +
           (form.taxi_id.value ? ' Gastos asignados al auto según el taxi del día de cada gasto.' : '') + '</p></div>' +
           '<button type="button" id="report-csv-btn">Descargar CSV</button>' +
+          '<button type="button" id="report-zip-btn">Descargar facturas (ZIP)</button>' +
           '<h3>Por día</h3>' + dayRows(rep.per_day);
         if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; });
         if (!form.taxi_id.value) html += '<h3>Por auto</h3>' + breakdownRows(rep.per_taxi, function (r) { return r.taxi_identifier; });
@@ -1021,6 +1266,8 @@
         result.innerHTML = html;
         var csvBtn = document.getElementById('report-csv-btn');
         if (csvBtn) csvBtn.addEventListener('click', function () { downloadReportCsv(rep); });
+        var zipBtn = document.getElementById('report-zip-btn');
+        if (zipBtn) zipBtn.addEventListener('click', function () { downloadReceiptsZip(); });
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
     }
 

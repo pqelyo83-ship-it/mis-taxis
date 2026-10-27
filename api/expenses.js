@@ -80,15 +80,26 @@ module.exports = async function handler(req, res) {
       params.push(String(req.query.date));
       conditions.push('e.expense_date = $' + params.length);
     }
+    if (req.query && req.query.from && req.query.to) {
+      params.push(String(req.query.from));
+      var fromIdx = params.length;
+      params.push(String(req.query.to));
+      conditions.push('e.expense_date BETWEEN $' + fromIdx + ' AND $' + params.length);
+    }
     let join = '';
     if (req.query && req.query.taxi_id) {
       join = ' LEFT JOIN day_shifts s ON s.driver_id = e.driver_id AND s.shift_date = e.expense_date AND s.company_id = e.company_id';
       params.push(Number(req.query.taxi_id));
       conditions.push('s.taxi_id = $' + params.length);
     }
+    var limitSql = '';
+    if (req.query && req.query.limit === 'all') limitSql = '';
+    else if (req.query && req.query.limit) limitSql = ' LIMIT ' + Math.min(Math.max(Number(req.query.limit) || 100, 1), 1000);
+    else if (req.query && (req.query.from || req.query.to)) limitSql = '';
+    else limitSql = ' LIMIT 100';
     const result = await pool.query(
       'SELECT e.*, u.name AS driver_name FROM expenses e JOIN users u ON u.id = e.driver_id' + join +
-      ' WHERE ' + conditions.join(' AND ') + ' ORDER BY e.expense_date DESC, e.id DESC',
+      ' WHERE ' + conditions.join(' AND ') + ' ORDER BY e.expense_date DESC, e.id DESC' + limitSql,
       params
     );
     res.status(200).json(result.rows.map(publicExpense));

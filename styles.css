@@ -93,6 +93,7 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eee; }
 .ok { color: #15803d; font-weight: 600; }
 .perf-bar { background: #e5e5e5; height: 14px; border-radius: 7px; overflow: hidden; margin: 6px 0; }
 .perf-bar-fill { background: #eab308; height: 100%; }
+.perf-bar-fill-expense { background: #dc2626; height: 100%; }
 button.chip { background: #ddd; color: #222; }
 button.chip.active { background: #111; color: #fff; }
 .hidden { display: none !important; }

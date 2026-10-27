@@ -33,9 +33,11 @@ module.exports = async function handler(req, res) {
 
   // Lista pública de empresas activas (id, nombre, código). Solo se exponen
   // nombre y código: alimenta el selector de empresa de la pantalla de ingreso.
+  // La empresa Demo NO aparece acá: solo se alcanza por su link directo
+  // (?company=CODIGO, abajo) o desde el panel del encargado.
   if (req.method === 'GET' && req.query && req.query.list === '1') {
     const result = await pool.query(
-      'SELECT id, name, code FROM companies WHERE active = TRUE ORDER BY name'
+      "SELECT id, name, code FROM companies WHERE active = TRUE AND name <> 'Demo' ORDER BY name"
     );
     res.status(200).json(result.rows);
     return;
