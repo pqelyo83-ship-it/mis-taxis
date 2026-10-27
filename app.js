@@ -108,6 +108,12 @@
     loginView.classList.remove('hidden');
     appView.classList.add('hidden');
     userBar.classList.add('hidden');
+    // El link de un dueño (?login=owner) abre la misma pantalla de siempre
+    // pero con el ingreso de dueños ya desplegado.
+    var params = new URLSearchParams(window.location.search);
+    if (params.get('login') === 'owner') {
+      document.getElementById('owner-login-form').classList.remove('hidden');
+    }
     loadCompanies();
   }
 
@@ -1045,20 +1051,22 @@
 
   async function renderEmpresas() {
     var companies = await api('/api/company?panel=1');
+    var origin = window.location.origin;
     var rows = companies.map(function (c) {
+      var link = origin + '/?company=' + esc(c.code) + '&login=owner';
       return '<div class="card"><p><strong>' + esc(c.name) + '</strong> · Código: ' + esc(c.code) +
         ' · Dueño: ' + esc(c.owner_name || '—') + (c.owner_email ? ' (' + esc(c.owner_email) + ')' : '') +
-        ' · Link: <a href="/?company=' + esc(c.code) + '">/?company=' + esc(c.code) + '</a></p></div>';
+        ' · Link: <a href="' + link + '">' + link + '</a></p></div>';
     }).join('');
     contentEl.innerHTML = '<h2>Empresas</h2>' +
-      '<p class="muted">Solo vos ves este panel. Acá das de alta a los dueños: les creás su empresa con email y contraseña y les pasás su link.</p>' +
+      '<p class="muted">Solo vos ves este panel. Acá das de alta a los dueños: les creás su empresa con email y PIN y les pasás su link.</p>' +
       (rows || '<p class="muted">Todavía no hay empresas.</p>') +
       '<h3>Dar de alta una empresa</h3>' +
       '<form id="empresa-form">' +
       '<label>Nombre de la empresa <input name="company_name" type="text" required></label>' +
       '<label>Nombre del dueño <input name="admin_name" type="text" required></label>' +
       '<label>Email del dueño <input name="email" type="email" required></label>' +
-      '<label>Contraseña del dueño <input name="password" type="password" required></label>' +
+      '<label>PIN del dueño <input name="pin" type="password" inputmode="numeric" required></label>' +
       '<button type="submit">Crear empresa</button></form>';
     document.getElementById('empresa-form').addEventListener('submit', async function (ev) {
       ev.preventDefault();
@@ -1068,9 +1076,10 @@
           company_name: f.company_name.value,
           admin_name: f.admin_name.value,
           email: f.email.value,
-          password: f.password.value,
+          pin: f.pin.value,
         });
-        showMessage('Empresa creada: ' + result.company.name + ' — código ' + result.company.code + '. Link: /?company=' + result.company.code, 'ok');
+        var ownerLink = window.location.origin + '/?company=' + result.company.code + '&login=owner';
+        showMessage('Empresa creada: ' + result.company.name + ' — código ' + result.company.code + '. Link para el dueño: ' + ownerLink + ' — pasale ese link con su email y PIN.', 'ok');
         renderTab();
       } catch (e) { showMessage(e.message, 'error'); }
     });
@@ -1118,7 +1127,7 @@
     var errorEl = document.getElementById('owner-login-error');
     errorEl.classList.add('hidden');
     try {
-      var data = await api('/api/auth', 'POST', { email: form.email.value, password: form.password.value });
+      var data = await api('/api/auth', 'POST', { email: form.email.value, pin: form.pin.value });
       token = data.token;
       user = data.user;
       localStorage.setItem('mt_token', token);

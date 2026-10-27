@@ -18,7 +18,7 @@
 <main>
   <section id="login-view">
     <h2>Ingresar con PIN</h2>
-    <p>Choferes: seleccioná tu empresa, tu nombre y escribí tu PIN. Dueños: entran con email y contraseña.</p>
+    <p>Choferes: seleccioná tu empresa, tu nombre y escribí tu PIN. Dueños: entran con email y PIN.</p>
     <form id="login-form">
       <label for="company-select">Empresa</label>
       <select id="company-select" required></select>
@@ -29,10 +29,10 @@
       <button type="submit">Entrar</button>
     </form>
     <p id="login-error" class="error hidden"></p>
-    <p><button id="show-owner-login-btn" type="button">Soy dueño: entrar con email</button></p>
+    <p><button id="show-owner-login-btn" type="button">Soy dueño: entrar con email y PIN</button></p>
     <form id="owner-login-form" class="hidden">
       <label>Email <input name="email" type="email" required></label>
-      <label>Contraseña <input name="password" type="password" required></label>
+      <label>PIN <input name="pin" type="password" inputmode="numeric" required></label>
       <button type="submit">Entrar como dueño</button>
     </form>
     <p id="owner-login-error" class="error hidden"></p>

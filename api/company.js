@@ -3,13 +3,13 @@
 // de Vercel, este único archivo atiende las rutas de empresa:
 //   GET /api/company?list=1   — lista pública de empresas activas (pantalla de ingreso).
 //   GET /api/company?panel=1  — lista de empresas con su dueño (solo superadmin).
-//   POST /api/company         — alta de empresa + dueño con email y contraseña (solo superadmin).
+//   POST /api/company         — alta de empresa + dueño con email y PIN (solo superadmin).
 //   GET /api/company          — datos de la empresa (solo admin).
 //   PUT /api/company          — nombre y horario de noche (solo admin).
 // El horario de noche define qué viajes se preseleccionan como nocturnos
 // en el celular del chofer; el chofer igual puede cambiar el turno por viaje.
 
-const { getPool, requireAuth, readBody, hashPassword, methodNotAllowed } = require('./_db');
+const { getPool, requireAuth, readBody, hashPin, newSalt, methodNotAllowed } = require('./_db');
 
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -35,10 +35,10 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  // Alta de empresa + dueño con email y contraseña.
+  // Alta de empresa + dueño con email y PIN.
   // Solo el superadmin (dueño de la plataforma) da altas. El registro
   // público está cerrado: nadie se crea una empresa sin pasar por él.
-  // Body: { company_name, admin_name, email, password }.
+  // Body: { company_name, admin_name, email, pin }.
   if (req.method === 'POST') {
     const user = await requireAuth(req, res, ['admin']);
     if (!user) return;
@@ -50,9 +50,9 @@ module.exports = async function handler(req, res) {
     const companyName = String(body.company_name || '').trim();
     const adminName = String(body.admin_name || '').trim();
     const email = String(body.email || '').trim().toLowerCase();
-    const password = String(body.password || '');
-    if (!companyName || !adminName || !email || email.indexOf('@') === -1 || !password || password.length < 6) {
-      res.status(400).json({ error: 'Faltan nombre de la empresa, nombre del dueño, email válido o contraseña (mínimo 6 caracteres)' });
+    const pin = String(body.pin || '');
+    if (!companyName || !adminName || !email || email.indexOf('@') === -1 || !pin || pin.length < 4) {
+      res.status(400).json({ error: 'Faltan nombre de la empresa, nombre del dueño, email válido o PIN (mínimo 4 caracteres)' });
       return;
     }
     const taken = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [email]);
@@ -81,10 +81,11 @@ module.exports = async function handler(req, res) {
        WHERE NOT EXISTS (SELECT 1 FROM payment_methods WHERE company_id = $1 AND LOWER(name) = LOWER(t.m))`,
       [company.rows[0].id]
     );
+    const salt = newSalt();
     await pool.query(
       `INSERT INTO users (company_id, name, role, phone, email, password_hash, pin_hash, pin_salt, taxi_id, commission_pct, active)
-       VALUES ($1, $2, 'admin', '', $3, $4, NULL, NULL, NULL, 0, TRUE)`,
-      [company.rows[0].id, adminName, email, hashPassword(password)]
+       VALUES ($1, $2, 'admin', '', $3, NULL, $4, $5, NULL, 0, TRUE)`,
+      [company.rows[0].id, adminName, email, hashPin(pin, salt), salt]
     );
     res.status(201).json({
       company: { id: company.rows[0].id, name: company.rows[0].name, code: company.rows[0].code },

@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
+-- Dueños: entran con email + PIN (pin_hash, igual que los choferes).
+-- password_hash quedó reservado sin uso.
+
 -- Métodos de pago por empresa (el dueño agrega los que trabaje).
 CREATE TABLE IF NOT EXISTS payment_methods (
   id SERIAL PRIMARY KEY,

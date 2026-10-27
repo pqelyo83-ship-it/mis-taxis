@@ -1,12 +1,12 @@
 // POST /api/auth — ingreso.
 // Choferes y admin con PIN: Body { user_id, company_id, pin }.
-// Dueños con email: Body { email, password } (dueños creados por el
-// superadmin, sin PIN). Respuesta: { token, user }.
+// Dueños con email: Body { email, pin } (dueños creados por el
+// superadmin: email + PIN, sin contraseña). Respuesta: { token, user }.
 // El usuario PIN debe pertenecer a la empresa indicada; si no, mismo error
 // genérico ("PIN incorrecto") para no revelar qué parte falló.
 
 const crypto = require('crypto');
-const { getPool, hashPin, verifyPassword, signToken, methodNotAllowed } = require('./_db');
+const { getPool, hashPin, signToken, methodNotAllowed } = require('./_db');
 
 const USER_SELECT = `
   SELECT u.id, u.name, u.role, u.phone, u.taxi_id, u.commission_pct,
@@ -50,12 +50,12 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return methodNotAllowed(res);
   const body = req.body && typeof req.body === 'object' ? req.body : {};
 
-  // Ingreso de dueños con email y contraseña (sin PIN).
-  if (body.email !== undefined || body.password !== undefined) {
+  // Ingreso de dueños con email y PIN (sin contraseña).
+  if (body.email !== undefined) {
     const email = String(body.email || '').trim().toLowerCase();
-    const password = String(body.password || '');
-    if (!email || !password) {
-      res.status(400).json({ error: 'Faltan email o contraseña' });
+    const pin = String(body.pin || '');
+    if (!email || !pin) {
+      res.status(400).json({ error: 'Faltan email o PIN' });
       return;
     }
     const result = await getPool().query(
@@ -63,8 +63,15 @@ module.exports = async function handler(req, res) {
       [email]
     );
     const row = result.rows[0];
-    if (!row || !row.active || !verifyPassword(password, row.password_hash)) {
-      res.status(401).json({ error: 'Email o contraseña incorrectos' });
+    if (!row || !row.active || !row.pin_hash || !row.pin_salt) {
+      res.status(401).json({ error: 'Email o PIN incorrectos' });
+      return;
+    }
+    const digest = hashPin(pin, row.pin_salt);
+    const a = Buffer.from(digest);
+    const b = Buffer.from(row.pin_hash);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      res.status(401).json({ error: 'Email o PIN incorrectos' });
       return;
     }
     sendSession(res, row);
