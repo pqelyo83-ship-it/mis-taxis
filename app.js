@@ -115,7 +115,12 @@
     var ownerOnly = params.get('login') === 'owner';
     document.getElementById('pin-login-block').classList.toggle('hidden', ownerOnly);
     document.getElementById('owner-login-block').classList.toggle('hidden', !ownerOnly);
-    if (!ownerOnly) loadCompanies();
+    if (ownerOnly) return;
+    // Si el link ya trae la empresa (?company=CODIGO), no se muestra ni se
+    // carga la lista de empresas: se fija esa empresa y punto.
+    var fixedCode = params.get('company');
+    if (fixedCode) { loadFixedCompany(fixedCode); return; }
+    loadCompanies();
   }
 
   // Empresas para la pantalla de ingreso. Si hay una sola, se elige sola;
@@ -141,6 +146,32 @@
       loadLoginUsers(select.value);
     } catch (e) {
       select.innerHTML = '<option value="">No se pudo cargar la lista</option>';
+    }
+  }
+
+  // Ingreso con link (?company=CODIGO): fija esa empresa sin cargar ni
+  // mostrar la lista completa. Si el código no existe, vuelve al selector.
+  async function loadFixedCompany(code) {
+    var select = document.getElementById('company-select');
+    var block = document.getElementById('company-select-block');
+    var fixedEl = document.getElementById('fixed-company-name');
+    try {
+      var c = await api('/api/company?code=' + encodeURIComponent(code));
+      if (!c || !c.id) throw new Error('sin empresa');
+      select.innerHTML = '';
+      var opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name + ' (' + c.code + ')';
+      select.appendChild(opt);
+      select.value = c.id;
+      block.classList.add('hidden');
+      fixedEl.innerHTML = 'Empresa: <strong>' + esc(c.name) + '</strong>';
+      fixedEl.classList.remove('hidden');
+      loadLoginUsers(c.id);
+    } catch (e) {
+      block.classList.remove('hidden');
+      fixedEl.classList.add('hidden');
+      loadCompanies();
     }
   }
 

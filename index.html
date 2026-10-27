@@ -21,8 +21,11 @@
       <h2>Ingresar con PIN</h2>
       <p>Choferes: seleccioná tu empresa, tu nombre y escribí tu PIN. Dueños: entran con email y PIN.</p>
       <form id="login-form">
-        <label for="company-select">Empresa</label>
-        <select id="company-select" required></select>
+        <div id="company-select-block">
+          <label for="company-select">Empresa</label>
+          <select id="company-select" required></select>
+        </div>
+        <p id="fixed-company-name" class="hidden"></p>
         <label for="user-select">Quién sos</label>
         <select id="user-select" required></select>
         <label for="pin-input">PIN</label>

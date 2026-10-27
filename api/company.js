@@ -2,6 +2,7 @@
 // Para no superar el límite de 12 funciones serverless del plan gratuito
 // de Vercel, este único archivo atiende las rutas de empresa:
 //   GET /api/company?list=1   — lista pública de empresas activas (pantalla de ingreso).
+//   GET /api/company?code=XX  — una empresa activa por código (ingreso con link, sin lista).
 //   GET /api/company?panel=1  — lista de empresas con su dueño (solo superadmin).
 //   POST /api/company         — alta de empresa + dueño con email y PIN (solo superadmin).
 //   PUT /api/company?panel=1&id= — editar empresa/dueño, suspender/reactivar, pago (solo superadmin, nunca la propia).
@@ -34,6 +35,21 @@ module.exports = async function handler(req, res) {
       'SELECT id, name, code FROM companies WHERE active = TRUE ORDER BY name'
     );
     res.status(200).json(result.rows);
+    return;
+  }
+
+  // Empresa por código (pública): para el ingreso con link (?company=CODIGO).
+  // Devuelve solo esa empresa activa, sin exponer la lista completa.
+  if (req.method === 'GET' && req.query && req.query.code) {
+    const result = await pool.query(
+      'SELECT id, name, code FROM companies WHERE code = $1 AND active = TRUE',
+      [String(req.query.code).toUpperCase()]
+    );
+    if (!result.rows[0]) {
+      res.status(404).json({ error: 'Empresa no encontrada' });
+      return;
+    }
+    res.status(200).json(result.rows[0]);
     return;
   }
 
