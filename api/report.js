@@ -1,8 +1,9 @@
 // /api/report — reportes del administrador.
 // Filtros: ?from=YYYY-MM-DD&to=YYYY-MM-DD (por defecto últimos 30 días),
-// ?driver_id= (todos si no viene), ?taxi_id= (todos si no viene).
+// ?driver_id= (todos si no viene), ?taxi_id= (todos si no viene),
+// ?payment_method_id= (todos si no viene).
 // Devuelve totales del período, $/km por día y promedio, y desgloses
-// por chofer y por taxi.
+// por chofer, por taxi y por método de pago.
 // $/km: solo se calcula sobre días con kilometraje cargado (jornada con
 // salida). Los días sin jornada no entran en el promedio.
 // Gastos con filtro de taxi: se asignan al auto según el taxi del día
@@ -43,12 +44,14 @@ module.exports = async function handler(req, res) {
   }
   const driverId = req.query.driver_id ? Number(req.query.driver_id) : null;
   const taxiId = req.query.taxi_id ? Number(req.query.taxi_id) : null;
+  const methodId = req.query.payment_method_id ? Number(req.query.payment_method_id) : null;
 
   // Condiciones para viajes (por fecha de viaje). Siempre con empresa.
   const tripCond = ['tr.company_id = $1', 'tr.trip_date BETWEEN $2 AND $3'];
   const tripParams = [user.company_id, from, to];
   if (driverId) { tripParams.push(driverId); tripCond.push('tr.driver_id = $' + tripParams.length); }
   if (taxiId) { tripParams.push(taxiId); tripCond.push('tr.taxi_id = $' + tripParams.length); }
+  if (methodId) { tripParams.push(methodId); tripCond.push('tr.payment_method_id = $' + tripParams.length); }
   const tripWhere = 'WHERE ' + tripCond.join(' AND ');
 
   // Condiciones para jornadas (por fecha de jornada). Siempre con empresa.
@@ -153,6 +156,25 @@ module.exports = async function handler(req, res) {
   const perDriver = mergeKm(tripsByDriver.rows, 'driver');
   const perTaxi = mergeKm(tripsByTaxi.rows, 'taxi');
 
+  // Desglose por método de pago (cuánto entró por Efectivo, Tarjeta, etc.).
+  const tripsByMethod = await pool.query(
+    `SELECT tr.payment_method_id AS method_id, COALESCE(pm.name, 'Sin método') AS method_name,
+            COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
+            COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps
+     FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id ${tripWhere}
+     GROUP BY tr.payment_method_id, pm.name ORDER BY total DESC`,
+    tripParams
+  );
+  const perMethod = tripsByMethod.rows.map(function (r) {
+    return {
+      method_id: r.method_id,
+      method_name: r.method_name,
+      trips: Number(r.trips),
+      total: round2(r.total),
+      driver_keeps: round2(r.keeps),
+    };
+  });
+
   let total = 0, keeps = 0, tripsCount = 0, kmTotal = 0, kmDaysRevenue = 0, kmDaysKm = 0, daysWithKm = 0;
   perDay.forEach(function (r) {
     total += r.total; keeps += r.keeps; tripsCount += r.trips;
@@ -177,5 +199,6 @@ module.exports = async function handler(req, res) {
     per_day: perDay,
     per_driver: perDriver,
     per_taxi: perTaxi,
+    per_method: perMethod,
   });
 };

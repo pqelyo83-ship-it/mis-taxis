@@ -153,7 +153,7 @@
         return;
       }
       select.innerHTML = users.map(function (u) {
-        return '<option value="' + u.id + '">' + esc(u.name) + (u.role === 'admin' ? ' (admin)' : '') + '</option>';
+        return '<option value="' + u.id + '">' + esc(u.name) + ((u.role === 'admin' || u.role === 'superadmin') ? ' (admin)' : '') + '</option>';
       }).join('');
     } catch (e) {
       select.innerHTML = '<option value="">No se pudo cargar la lista</option>';
@@ -165,7 +165,12 @@
     appView.classList.remove('hidden');
     userBar.classList.remove('hidden');
     userNameEl.textContent = user.name + (user.role === 'admin' ? ' (admin)' : '') +
-      (user.company_name ? ' · ' + user.company_name : '');
+      (user.company_name ? ' · ' + user.company_name : '') +
+      (user.is_superadmin ? ' · dueño de la app' : '');
+    if (!currentTab) {
+      var params = new URLSearchParams(window.location.search);
+      if (params.get('panel') === 'empresas' && user.is_superadmin) currentTab = 'empresas';
+    }
     buildTabs();
   }
 
@@ -189,7 +194,7 @@
   }
 
   function adminTabs() {
-    return [
+    var tabs = [
       { id: 'report', label: 'Reportes' },
       { id: 'closes', label: 'Cierres' },
       { id: 'taxis', label: 'Taxis' },
@@ -197,8 +202,11 @@
       { id: 'trips', label: 'Viajes' },
       { id: 'expenses', label: 'Gastos' },
       { id: 'company', label: 'Mi empresa' },
-      { id: 'pin', label: 'Mi PIN' },
+      { id: 'methods', label: 'Métodos de pago' },
     ];
+    if (user.is_superadmin) tabs.push({ id: 'empresas', label: 'Empresas' });
+    tabs.push({ id: 'pin', label: 'Mi PIN' });
+    return tabs;
   }
 
   function buildTabs() {
@@ -229,6 +237,8 @@
       'taxis': renderTaxis,
       'drivers': renderDrivers,
       'company': renderCompany,
+      'methods': renderPaymentMethods,
+      'empresas': renderEmpresas,
       'pin': renderPin,
     };
     var fn = renderers[currentTab];
@@ -377,6 +387,8 @@
 
   async function renderTrips() {
     var trips = await api('/api/trips');
+    var methods = [];
+    try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
     var title = user.role === 'admin' ? 'Todos los viajes' : 'Mis viajes';
     var rows = trips.map(function (t) {
       var shiftLine = t.entry_time
@@ -384,7 +396,7 @@
         : '';
       return '<div class="card"><p><strong>' + esc(t.trip_date) + '</strong> · ' + esc(t.driver_name || user.name) +
         (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + ' · Turno: ' + (t.shift_type === 'night' ? 'Noche' : 'Día') + mapLink(t.trip_lat, t.trip_lng, 'Mapa') + '</p>' + shiftLine +
-        '<p>Monto: ' + money(t.amount) + ' · %: ' + esc(t.pct_snapshot) + '% · Te quedás: ' + money(t.driver_keeps) + ' · Dueño: ' + money(t.owner_share) + '</p>' +
+        '<p>Monto: ' + money(t.amount) + ' · %: ' + esc(t.pct_snapshot) + '% · Te quedás: ' + money(t.driver_keeps) + ' · Dueño: ' + money(t.owner_share) + (t.payment_method_name ? ' · Pago: ' + esc(t.payment_method_name) : '') + '</p>' +
         '<button type="button" class="secondary small" data-edit-trip="' + t.id + '">Editar</button> ' +
         '<button type="button" class="danger small" data-del-trip="' + t.id + '">Borrar</button></div>';
     }).join('');
@@ -393,9 +405,21 @@
       btn.addEventListener('click', function () {
         var t = trips.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-trip'); });
         var card = btn.closest('.card');
+        // Si el método del viaje está inactivo (no viene en la lista del
+        // chofer), igual se muestra para no cambiarlo sin querer.
+        var editMethods = methods.slice();
+        if (t.payment_method_id && !editMethods.find(function (m) { return String(m.id) === String(t.payment_method_id); })) {
+          editMethods.unshift({ id: t.payment_method_id, name: (t.payment_method_name || 'Método') + ' (inactivo)' });
+        }
+        var methodOptions = editMethods.length
+          ? editMethods.map(function (m) {
+              return '<option value="' + m.id + '"' + (String(m.id) === String(t.payment_method_id) ? ' selected' : '') + '>' + esc(m.name) + '</option>';
+            }).join('')
+          : '<option value="">Sin métodos</option>';
         card.innerHTML = '<form class="row">' +
           '<label>Fecha <input name="trip_date" type="date" value="' + esc(t.trip_date) + '" required></label>' +
           '<label>Turno <select name="shift_type"><option value="day"' + (t.shift_type === 'night' ? '' : ' selected') + '>Día</option><option value="night"' + (t.shift_type === 'night' ? ' selected' : '') + '>Noche</option></select></label>' +
+          '<label>Método de pago <select name="payment_method_id">' + methodOptions + '</select></label>' +
           '<label>Monto (USD) <input name="amount" type="number" step="0.01" min="0" value="' + esc(t.amount) + '" required></label>' +
           '<button type="submit">Guardar cambios</button> <button type="button" data-cancel-edit>Cancelar</button></form>';
         var f = card.querySelector('form');
@@ -405,6 +429,7 @@
             await api('/api/trips?id=' + t.id, 'PUT', {
               trip_date: f.trip_date.value,
               shift_type: f.shift_type.value,
+              payment_method_id: f.payment_method_id.value,
               amount: f.amount.value,
             });
             showMessage('Viaje actualizado.', 'ok');
@@ -426,7 +451,7 @@
     });
   }
 
-  function tripFormHtml() {
+  function tripFormHtml(methods) {
     var hour = new Date().getHours();
     var nightStart = (user.night_start !== undefined && user.night_start !== null) ? user.night_start : 22;
     var nightEnd = (user.night_end !== undefined && user.night_end !== null) ? user.night_end : 6;
@@ -435,9 +460,15 @@
     if (user.commission_day_pct !== undefined && user.commission_night_pct !== undefined) {
       pctNote = ' Tu %: día ' + esc(user.commission_day_pct) + '% · noche ' + esc(user.commission_night_pct) + '%.';
     }
+    var methodOptions = (methods && methods.length)
+      ? methods.map(function (m) {
+          return '<option value="' + m.id + '">' + esc(m.name) + '</option>';
+        }).join('')
+      : '<option value="">Sin métodos de pago</option>';
     return '<h2>Nuevo viaje</h2><form id="trip-form">' +
       '<label>Fecha <input name="trip_date" type="date" value="' + todayLocal() + '" required></label>' +
       '<label>Turno <select name="shift_type"><option value="day"' + (nightDefault ? '' : ' selected') + '>Día</option><option value="night"' + (nightDefault ? ' selected' : '') + '>Noche</option></select></label>' +
+      '<label>Método de pago <select name="payment_method_id" required>' + methodOptions + '</select></label>' +
       '<label>Monto del viaje (USD) <input name="amount" type="number" step="0.01" min="0" required></label>' +
       '<button type="submit">Guardar viaje</button></form>' +
       '<p class="muted" id="trip-geo-status">Detectando ubicación…</p>' +
@@ -446,7 +477,9 @@
 
   async function renderNewTrip() {
     var tripGeo = null;
-    contentEl.innerHTML = tripFormHtml();
+    var methods = [];
+    try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
+    contentEl.innerHTML = tripFormHtml(methods);
     captureLocation(function (geo) {
       tripGeo = geo;
       var st = document.getElementById('trip-geo-status');
@@ -458,6 +491,7 @@
       var body = {
         trip_date: f.trip_date.value,
         shift_type: f.shift_type.value,
+        payment_method_id: f.payment_method_id.value,
         amount: f.amount.value,
       };
       if (tripGeo) { body.trip_lat = tripGeo.lat; body.trip_lng = tripGeo.lng; }
@@ -584,19 +618,25 @@
   async function renderReport() {
     var drivers = [];
     var taxis = [];
+    var methods = [];
     try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
     try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
+    try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
     var driverOptions = '<option value="">Todos los choferes</option>' + drivers.map(function (d) {
       return '<option value="' + d.id + '">' + esc(d.name) + '</option>';
     }).join('');
     var taxiOptions = '<option value="">Todos los autos</option>' + taxis.map(function (t) {
       return '<option value="' + t.id + '">' + esc(t.identifier) + '</option>';
     }).join('');
+    var methodOptions = '<option value="">Todos los métodos</option>' + methods.map(function (m) {
+      return '<option value="' + m.id + '">' + esc(m.name) + '</option>';
+    }).join('');
     contentEl.innerHTML = '<h2>Reportes</h2><form id="report-form" class="row">' +
       '<label>Desde <input name="from" type="date" value="' + daysAgoLocal(30) + '" required></label>' +
       '<label>Hasta <input name="to" type="date" value="' + todayLocal() + '" required></label>' +
       '<label>Chofer <select name="driver_id">' + driverOptions + '</select></label>' +
       '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
+      '<label>Método de pago <select name="payment_method_id">' + methodOptions + '</select></label>' +
       '<button type="submit">Buscar</button></form><div id="report-result"></div>';
     var form = document.getElementById('report-form');
     var result = document.getElementById('report-result');
@@ -649,6 +689,11 @@
       rep.per_taxi.forEach(function (r) {
         lines.push(['Por auto', csvCell(r.taxi_identifier), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''].join(','));
       });
+      lines.push('');
+      lines.push('Por metodo de pago,Metodo,Viajes,Recaudado,Se quedan los choferes');
+      (rep.per_method || []).forEach(function (r) {
+        lines.push(['Por metodo de pago', csvCell(r.method_name), r.trips, r.total, r.driver_keeps].join(','));
+      });
       var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
@@ -664,6 +709,7 @@
       var q = 'from=' + encodeURIComponent(form.from.value) + '&to=' + encodeURIComponent(form.to.value);
       if (form.driver_id.value) q += '&driver_id=' + encodeURIComponent(form.driver_id.value);
       if (form.taxi_id.value) q += '&taxi_id=' + encodeURIComponent(form.taxi_id.value);
+      if (form.payment_method_id.value) q += '&payment_method_id=' + encodeURIComponent(form.payment_method_id.value);
       result.innerHTML = '<p class="muted">Buscando…</p>';
       try {
         var rep = await api('/api/report?' + q);
@@ -679,6 +725,12 @@
           '<h3>Por día</h3>' + dayRows(rep.per_day);
         if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; });
         if (!form.taxi_id.value) html += '<h3>Por auto</h3>' + breakdownRows(rep.per_taxi, function (r) { return r.taxi_identifier; });
+        if (rep.per_method && rep.per_method.length) {
+          html += '<h3>Por método de pago</h3><div class="table-wrap"><table><thead><tr><th>Método</th><th>Viajes</th><th>Recaudado</th><th>Se quedan los choferes</th></tr></thead><tbody>' +
+            rep.per_method.map(function (r) {
+              return '<tr><td>' + esc(r.method_name) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + money(r.driver_keeps) + '</td></tr>';
+            }).join('') + '</tbody></table></div>';
+        }
         result.innerHTML = html;
         var csvBtn = document.getElementById('report-csv-btn');
         if (csvBtn) csvBtn.addEventListener('click', function () { downloadReportCsv(rep); });
@@ -955,6 +1007,75 @@
     });
   }
 
+  // ---------- Métodos de pago (solo admin) ----------
+
+  async function renderPaymentMethods() {
+    var methods = await api('/api/trips?methods=1');
+    var rows = methods.map(function (m) {
+      return '<div class="card"><p><strong>' + esc(m.name) + '</strong> · ' + (m.active ? 'Activo' : 'Inactivo') + ' ' +
+        '<button type="button" class="small" data-toggle-method="' + m.id + '" data-active="' + (m.active ? '0' : '1') + '">' + (m.active ? 'Desactivar' : 'Activar') + '</button></p></div>';
+    }).join('');
+    contentEl.innerHTML = '<h2>Métodos de pago</h2>' +
+      '<p class="muted">Los métodos que cada chofer puede elegir al cargar un viaje. Desactivar no borra el historial: los viajes viejos conservan su método.</p>' +
+      (rows || '<p class="muted">Todavía no hay métodos.</p>') +
+      '<h3>Agregar método</h3><form id="method-form" class="row">' +
+      '<label>Nombre <input name="name" type="text" required></label>' +
+      '<button type="submit">Agregar</button></form>';
+    document.getElementById('method-form').addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      var f = ev.target;
+      try {
+        await api('/api/trips?methods=1', 'POST', { name: f.name.value });
+        showMessage('Método agregado.', 'ok');
+        renderTab();
+      } catch (e) { showMessage(e.message, 'error'); }
+    });
+    contentEl.querySelectorAll('[data-toggle-method]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        try {
+          await api('/api/trips?methods=1&id=' + btn.getAttribute('data-toggle-method'), 'PUT', { active: btn.getAttribute('data-active') === '1' });
+          showMessage('Método actualizado.', 'ok');
+          renderTab();
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
+  }
+
+  // ---------- Empresas (solo superadmin: dueño de la plataforma) ----------
+
+  async function renderEmpresas() {
+    var companies = await api('/api/company?panel=1');
+    var rows = companies.map(function (c) {
+      return '<div class="card"><p><strong>' + esc(c.name) + '</strong> · Código: ' + esc(c.code) +
+        ' · Dueño: ' + esc(c.owner_name || '—') + (c.owner_email ? ' (' + esc(c.owner_email) + ')' : '') +
+        ' · Link: <a href="/?company=' + esc(c.code) + '">/?company=' + esc(c.code) + '</a></p></div>';
+    }).join('');
+    contentEl.innerHTML = '<h2>Empresas</h2>' +
+      '<p class="muted">Solo vos ves este panel. Acá das de alta a los dueños: les creás su empresa con email y contraseña y les pasás su link.</p>' +
+      (rows || '<p class="muted">Todavía no hay empresas.</p>') +
+      '<h3>Dar de alta una empresa</h3>' +
+      '<form id="empresa-form">' +
+      '<label>Nombre de la empresa <input name="company_name" type="text" required></label>' +
+      '<label>Nombre del dueño <input name="admin_name" type="text" required></label>' +
+      '<label>Email del dueño <input name="email" type="email" required></label>' +
+      '<label>Contraseña del dueño <input name="password" type="password" required></label>' +
+      '<button type="submit">Crear empresa</button></form>';
+    document.getElementById('empresa-form').addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      var f = ev.target;
+      try {
+        var result = await api('/api/company', 'POST', {
+          company_name: f.company_name.value,
+          admin_name: f.admin_name.value,
+          email: f.email.value,
+          password: f.password.value,
+        });
+        showMessage('Empresa creada: ' + result.company.name + ' — código ' + result.company.code + '. Link: /?company=' + result.company.code, 'ok');
+        renderTab();
+      } catch (e) { showMessage(e.message, 'error'); }
+    });
+  }
+
   // ---------- Login ----------
 
   document.getElementById('company-select').addEventListener('change', function (ev) {
@@ -984,34 +1105,30 @@
   });
 
   // Registro de empresa nueva (venta a otros dueños).
-  document.getElementById('show-register-btn').addEventListener('click', function () {
-    document.getElementById('register-form').classList.toggle('hidden');
-    document.getElementById('register-result').classList.add('hidden');
+  // Ingreso de dueños con email y contraseña (los dueños creados desde
+  // el panel Empresas no tienen PIN).
+  document.getElementById('show-owner-login-btn').addEventListener('click', function () {
+    document.getElementById('owner-login-form').classList.toggle('hidden');
+    document.getElementById('owner-login-error').classList.add('hidden');
   });
 
-  document.getElementById('register-form').addEventListener('submit', async function (ev) {
+  document.getElementById('owner-login-form').addEventListener('submit', async function (ev) {
     ev.preventDefault();
     var form = ev.target;
-    var resultEl = document.getElementById('register-result');
-    resultEl.classList.add('hidden');
+    var errorEl = document.getElementById('owner-login-error');
+    errorEl.classList.add('hidden');
     try {
-      var result = await api('/api/company', 'POST', {
-        company_name: form.company_name.value,
-        admin_name: form.admin_name.value,
-        pin: form.pin.value,
-      });
-      resultEl.textContent = 'Empresa creada: ' + result.company.name + ' — código ' + result.company.code +
-        '. Ya podés ingresar con tu nombre y PIN.';
-      resultEl.classList.remove('hidden');
-      form.classList.add('hidden');
+      var data = await api('/api/auth', 'POST', { email: form.email.value, password: form.password.value });
+      token = data.token;
+      user = data.user;
+      localStorage.setItem('mt_token', token);
+      localStorage.setItem('mt_user', JSON.stringify(user));
       form.reset();
-      await loadCompanies();
-      var select = document.getElementById('company-select');
-      if (select) select.value = result.company.id;
-      loadLoginUsers(result.company.id);
+      currentTab = null;
+      showApp();
     } catch (e) {
-      resultEl.textContent = e.message;
-      resultEl.classList.remove('hidden');
+      errorEl.textContent = e.message;
+      errorEl.classList.remove('hidden');
     }
   });
 

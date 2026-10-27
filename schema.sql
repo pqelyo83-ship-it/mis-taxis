@@ -29,17 +29,32 @@ CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   company_id INTEGER REFERENCES companies(id),
   name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'driver')),
+  role TEXT NOT NULL CHECK (role IN ('admin', 'driver', 'superadmin')),
   phone TEXT NOT NULL DEFAULT '',
+  email TEXT,
+  password_hash TEXT,
   taxi_id INTEGER REFERENCES taxis(id) ON DELETE SET NULL,
   commission_pct NUMERIC(5,2) NOT NULL DEFAULT 0 CHECK (commission_pct >= 0 AND commission_pct <= 100),
   commission_day_pct NUMERIC(5,2) CHECK (commission_day_pct >= 0 AND commission_day_pct <= 100),
   commission_night_pct NUMERIC(5,2) CHECK (commission_night_pct >= 0 AND commission_night_pct <= 100),
-  pin_hash TEXT NOT NULL,
-  pin_salt TEXT NOT NULL,
+  pin_hash TEXT,
+  pin_salt TEXT,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+-- Métodos de pago por empresa (el dueño agrega los que trabaje).
+CREATE TABLE IF NOT EXISTS payment_methods (
+  id SERIAL PRIMARY KEY,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  name TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pm_company_name ON payment_methods(company_id, LOWER(name));
 
 CREATE TABLE IF NOT EXISTS trips (
   id SERIAL PRIMARY KEY,
@@ -54,6 +69,7 @@ CREATE TABLE IF NOT EXISTS trips (
   amount NUMERIC(10,2) NOT NULL CHECK (amount >= 0),
   pct_snapshot NUMERIC(5,2) NOT NULL CHECK (pct_snapshot >= 0 AND pct_snapshot <= 100),
   shift_type VARCHAR(10) NOT NULL DEFAULT 'day' CHECK (shift_type IN ('day', 'night')),
+  payment_method_id INTEGER REFERENCES payment_methods(id),
   trip_lat NUMERIC(9,6),
   trip_lng NUMERIC(9,6),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

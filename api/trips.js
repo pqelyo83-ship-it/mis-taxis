@@ -31,6 +31,8 @@ function withSplit(row) {
     amount: row.amount,
     pct_snapshot: row.pct_snapshot,
     shift_type: row.shift_type || 'day',
+    payment_method_id: row.payment_method_id,
+    payment_method_name: row.payment_method_name || null,
     trip_lat: row.trip_lat,
     trip_lng: row.trip_lng,
     driver_keeps: driverKeeps,
@@ -59,10 +61,12 @@ function geoPair(body) {
 }
 
 const SELECT_SQL = `
-  SELECT tr.*, u.name AS driver_name, t.identifier AS taxi_identifier
+  SELECT tr.*, u.name AS driver_name, t.identifier AS taxi_identifier,
+         pm.name AS payment_method_name
   FROM trips tr
   JOIN users u ON u.id = tr.driver_id
   LEFT JOIN taxis t ON t.id = tr.taxi_id
+  LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id
 `;
 
 module.exports = async function handler(req, res) {
@@ -70,6 +74,69 @@ module.exports = async function handler(req, res) {
   if (!user) return;
   const pool = getPool();
   const id = req.query && req.query.id ? Number(req.query.id) : null;
+
+  // Métodos de pago de la empresa (?methods=1). El admin los administra
+  // (agregar, renombrar, activar/desactivar); el chofer solo ve los activos
+  // para el formulario de viaje. Desactivar no borra el historial.
+  if (req.query && req.query.methods === '1') {
+    if (req.method === 'GET') {
+      const result = user.role === 'admin'
+        ? await pool.query('SELECT * FROM payment_methods WHERE company_id = $1 ORDER BY name', [user.company_id])
+        : await pool.query('SELECT * FROM payment_methods WHERE company_id = $1 AND active = TRUE ORDER BY name', [user.company_id]);
+      res.status(200).json(result.rows);
+      return;
+    }
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    const mbody = readBody(req);
+    if (req.method === 'POST') {
+      const name = String(mbody.name || '').trim();
+      if (!name) {
+        res.status(400).json({ error: 'Falta el nombre del método' });
+        return;
+      }
+      try {
+        const created = await pool.query(
+          'INSERT INTO payment_methods (company_id, name, active) VALUES ($1, $2, TRUE) RETURNING *',
+          [user.company_id, name]
+        );
+        res.status(201).json(created.rows[0]);
+      } catch (e) {
+        res.status(400).json({ error: 'Ese método de pago ya existe' });
+      }
+      return;
+    }
+    if (req.method === 'PUT') {
+      if (!id) {
+        res.status(400).json({ error: 'Falta id' });
+        return;
+      }
+      const current = await pool.query('SELECT * FROM payment_methods WHERE id = $1 AND company_id = $2', [id, user.company_id]);
+      if (!current.rows[0]) {
+        res.status(404).json({ error: 'Método no encontrado' });
+        return;
+      }
+      const newName = mbody.name !== undefined ? String(mbody.name || '').trim() : current.rows[0].name;
+      const newActive = mbody.active !== undefined ? mbody.active !== false : current.rows[0].active;
+      if (!newName) {
+        res.status(400).json({ error: 'Falta el nombre' });
+        return;
+      }
+      try {
+        const updated = await pool.query(
+          'UPDATE payment_methods SET name = $1, active = $2 WHERE id = $3 RETURNING *',
+          [newName, newActive, id]
+        );
+        res.status(200).json(updated.rows[0]);
+      } catch (e) {
+        res.status(400).json({ error: 'Ese método de pago ya existe' });
+      }
+      return;
+    }
+    return methodNotAllowed(res);
+  }
 
   if (req.method === 'GET') {
     const conditions = [];
@@ -124,10 +191,23 @@ module.exports = async function handler(req, res) {
       taxiId = shift.rows[0] ? shift.rows[0].taxi_id : driver.rows[0].taxi_id;
     }
     const geo = geoPair(body);
+    // Método de pago: debe ser uno activo de la empresa del chofer.
+    let paymentMethodId = null;
+    if (body.payment_method_id !== undefined && body.payment_method_id !== '' && body.payment_method_id !== null) {
+      const pm = await pool.query(
+        'SELECT id FROM payment_methods WHERE id = $1 AND company_id = $2 AND active = TRUE',
+        [Number(body.payment_method_id), driver.rows[0].company_id]
+      );
+      if (!pm.rows[0]) {
+        res.status(400).json({ error: 'Método de pago inválido' });
+        return;
+      }
+      paymentMethodId = pm.rows[0].id;
+    }
     const inserted = await pool.query(
-      `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng)
-       VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9) RETURNING *`,
-      [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null]
+      `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng, payment_method_id)
+       VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null, paymentMethodId]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [inserted.rows[0].id]);
     res.status(201).json(withSplit(full.rows[0]));
@@ -178,9 +258,28 @@ module.exports = async function handler(req, res) {
     const geo = geoPair(body);
     const newLat = geo ? geo.lat : current.rows[0].trip_lat;
     const newLng = geo ? geo.lng : current.rows[0].trip_lng;
+    // El método de pago solo cambia si viene en el body; si no, se conserva.
+    // Se acepta el método actual aunque esté inactivo (para no trabar la
+    // edición de viajes viejos); los demás deben estar activos.
+    let newMethodId = current.rows[0].payment_method_id;
+    if (body.payment_method_id !== undefined) {
+      if (body.payment_method_id === '' || body.payment_method_id === null) {
+        newMethodId = null;
+      } else {
+        const pm = await pool.query(
+          'SELECT id FROM payment_methods WHERE id = $1 AND company_id = $2 AND (active = TRUE OR id = $3)',
+          [Number(body.payment_method_id), current.rows[0].company_id, current.rows[0].payment_method_id]
+        );
+        if (!pm.rows[0]) {
+          res.status(400).json({ error: 'Método de pago inválido' });
+          return;
+        }
+        newMethodId = pm.rows[0].id;
+      }
+    }
     const updated = await pool.query(
-      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3, shift_type = $4, pct_snapshot = $5, trip_lat = $6, trip_lng = $7 WHERE id = $8 RETURNING *`,
-      [body.trip_date, amount, taxiId, newShiftType, newPct, newLat, newLng, id]
+      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3, shift_type = $4, pct_snapshot = $5, trip_lat = $6, trip_lng = $7, payment_method_id = $8 WHERE id = $9 RETURNING *`,
+      [body.trip_date, amount, taxiId, newShiftType, newPct, newLat, newLng, newMethodId, id]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [updated.rows[0].id]);
     res.status(200).json(withSplit(full.rows[0]));

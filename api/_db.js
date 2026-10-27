@@ -21,6 +21,26 @@ function hashPin(pin, salt) {
   return crypto.createHash('sha256').update(String(salt) + String(pin)).digest('hex');
 }
 
+// Contraseñas de dueños (email): hash scrypt con sal. El formato guardado
+// es "sal:hash" en hexadecimal. Nunca se guarda la contraseña en texto plano.
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return salt + ':' + hash;
+}
+
+function verifyPassword(password, stored) {
+  try {
+    if (!stored || stored.indexOf(':') === -1) return false;
+    const parts = stored.split(':');
+    const hash = crypto.scryptSync(String(password), parts[0], 64);
+    const expected = Buffer.from(parts[1], 'hex');
+    return hash.length === expected.length && crypto.timingSafeEqual(hash, expected);
+  } catch (e) {
+    return false;
+  }
+}
+
 function newSalt() {
   return crypto.randomBytes(16).toString('hex');
 }
@@ -57,13 +77,17 @@ function verifyToken(req) {
 
 // Devuelve el usuario autenticado o responde 401/403 y devuelve null.
 // roles: array opcional, por ejemplo ['admin'] o ['admin', 'driver'].
+// El superadmin (dueño de la plataforma) pasa los controles de 'admin' y
+// además queda marcado con is_superadmin; su empresa operativa es la suya
+// (company_id), el panel Empresas es lo único que ignora ese filtro.
 async function requireAuth(req, res, roles) {
   const payload = verifyToken(req);
   if (!payload) {
     res.status(401).json({ error: 'No autorizado' });
     return null;
   }
-  if (roles && roles.indexOf(payload.role) === -1) {
+  const effectiveRole = payload.role === 'superadmin' ? 'admin' : payload.role;
+  if (roles && roles.indexOf(effectiveRole) === -1) {
     res.status(403).json({ error: 'Sin permiso' });
     return null;
   }
@@ -71,11 +95,14 @@ async function requireAuth(req, res, roles) {
     'SELECT id, name, role, phone, taxi_id, commission_pct, company_id, active FROM users WHERE id = $1',
     [payload.userId]
   );
-  const user = result.rows[0];
-  if (!user || !user.active) {
+  const row = result.rows[0];
+  if (!row || !row.active) {
     res.status(401).json({ error: 'No autorizado' });
     return null;
   }
+  const user = row;
+  user.is_superadmin = row.role === 'superadmin';
+  if (user.is_superadmin) user.role = 'admin';
   return user;
 }
 
@@ -100,6 +127,8 @@ function methodNotAllowed(res) {
 module.exports = {
   getPool,
   hashPin,
+  hashPassword,
+  verifyPassword,
   newSalt,
   signToken,
   verifyToken,
