@@ -156,64 +156,120 @@
   }
 
   // ---------- Mi día (jornada) ----------
+  // Al entrar, el chofer carga hora y km de entrada (y el taxi del día).
+  // Al terminar, pulsa "Cerrar el día" y carga hora y km de cierre.
+  // Después del cierre se muestra el resumen del día.
 
   async function renderDay() {
     var taxis = [];
     try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
-    var taxiOptions = taxis.map(function (t) {
-      return '<option value="' + t.id + '"' + (user.taxi_id === t.id ? ' selected' : '') + '>' + esc(t.identifier) + '</option>';
-    }).join('');
-    contentEl.innerHTML = '<h2>Mi día</h2><form id="day-form" class="row">' +
-      '<label>Fecha <input name="shift_date" type="date" value="' + todayLocal() + '" required></label>' +
-      '<label>Taxi del día <select name="taxi_id">' + taxiOptions + '</select></label>' +
-      '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
-      '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
-      '<label>Hora de salida <input name="exit_time" type="time"></label>' +
-      '<label>Km de salida <input name="exit_km" type="number" step="0.01" min="0"></label>' +
-      '<button type="submit">Guardar día</button></form><div id="day-result"></div>' +
-      '<p class="muted">Al arrancar el día cargá entrada y taxi; al terminar, completá la salida. Después, cada viaje lleva solo el monto.</p>';
-    var form = document.getElementById('day-form');
-    var result = document.getElementById('day-result');
-    async function load() {
-      try {
-        var shifts = await api('/api/shifts?date=' + encodeURIComponent(form.shift_date.value));
-        var s = shifts && shifts[0] ? shifts[0] : null;
-        if (s) {
-          form.taxi_id.value = s.taxi_id || '';
-          form.entry_time.value = s.entry_time || '';
-          form.entry_km.value = s.entry_km !== null ? s.entry_km : '';
-          form.exit_time.value = s.exit_time || '';
-          form.exit_km.value = s.exit_km !== null ? s.exit_km : '';
-          result.innerHTML = s.km_driven !== null && s.km_driven !== undefined
-            ? '<p>Km recorridos ese día: <strong>' + esc(s.km_driven) + ' km</strong></p>'
-            : '<p class="muted">Jornada cargada, falta la salida.</p>';
-        } else {
-          form.entry_time.value = '';
-          form.entry_km.value = '';
-          form.exit_time.value = '';
-          form.exit_km.value = '';
-          result.innerHTML = '<p class="muted">Sin jornada para esa fecha.</p>';
-        }
-      } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
+    contentEl.innerHTML = '<h2>Mi día</h2>' +
+      '<label>Fecha <input id="day-date" type="date" value="' + todayLocal() + '"></label>' +
+      '<div id="day-state"></div>';
+    var dateInput = document.getElementById('day-date');
+    var stateEl = document.getElementById('day-state');
+
+    function taxiSelect(selectedId) {
+      return '<label>Taxi del día <select name="taxi_id">' + taxis.map(function (t) {
+        return '<option value="' + t.id + '"' + (selectedId === t.id ? ' selected' : '') + '>' + esc(t.identifier) + '</option>';
+      }).join('') + '</select></label>';
     }
-    form.shift_date.addEventListener('change', load);
-    form.addEventListener('submit', async function (ev) {
-      ev.preventDefault();
+
+    async function load() {
+      var date = dateInput.value;
       try {
-        var saved = await api('/api/shifts', 'POST', {
-          shift_date: form.shift_date.value,
-          taxi_id: form.taxi_id.value,
-          entry_time: form.entry_time.value,
-          entry_km: form.entry_km.value,
-          exit_time: form.exit_time.value || null,
-          exit_km: form.exit_km.value === '' ? null : form.exit_km.value,
-        });
-        showMessage('Día guardado.', 'ok');
-        if (saved.km_driven !== null && saved.km_driven !== undefined) {
-          result.innerHTML = '<p>Km recorridos ese día: <strong>' + esc(saved.km_driven) + ' km</strong></p>';
+        var shifts = await api('/api/shifts?date=' + encodeURIComponent(date));
+        var s = shifts && shifts[0] ? shifts[0] : null;
+        if (!s) {
+          // Sin jornada: entrada del día.
+          stateEl.innerHTML = '<form id="day-start-form" class="row">' + taxiSelect(user.taxi_id) +
+            '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
+            '<label>Km del auto <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
+            '<button type="submit">Empezar día</button></form>' +
+            '<p class="muted">Al entrar, cargá la hora y el kilometraje con el que agarrás el auto.</p>';
+          document.getElementById('day-start-form').addEventListener('submit', async function (ev) {
+            ev.preventDefault();
+            var f = ev.target;
+            try {
+              await api('/api/shifts', 'POST', {
+                shift_date: date,
+                taxi_id: f.taxi_id.value,
+                entry_time: f.entry_time.value,
+                entry_km: f.entry_km.value,
+                exit_time: null,
+                exit_km: null,
+              });
+              showMessage('Día empezado.', 'ok');
+              load();
+            } catch (e) { showMessage(e.message, 'error'); }
+          });
+        } else if (!s.exit_time && s.exit_km === null) {
+          // Jornada abierta: botón para cerrar el día.
+          stateEl.innerHTML = '<p>Taxi del día: <strong>' + esc(s.taxi_identifier || '—') + '</strong> · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km</p>' +
+            '<form id="day-close-form" class="row">' +
+            '<label>Hora de cierre <input name="exit_time" type="time" required></label>' +
+            '<label>Km con el que queda el auto <input name="exit_km" type="number" step="0.01" min="0" required></label>' +
+            '<button type="submit">Cerrar el día</button></form>';
+          document.getElementById('day-close-form').addEventListener('submit', async function (ev) {
+            ev.preventDefault();
+            var f = ev.target;
+            try {
+              await api('/api/shifts', 'POST', {
+                shift_date: date,
+                taxi_id: s.taxi_id,
+                entry_time: s.entry_time,
+                entry_km: s.entry_km,
+                exit_time: f.exit_time.value,
+                exit_km: f.exit_km.value,
+              });
+              showMessage('Día cerrado.', 'ok');
+              load();
+            } catch (e) { showMessage(e.message, 'error'); }
+          });
+        } else {
+          // Día cerrado: resumen + cierre.
+          var closes = await api('/api/day-close?date=' + encodeURIComponent(date));
+          var kmLine = (s.km_driven !== null && s.km_driven !== undefined)
+            ? ' · Km recorridos: <strong>' + esc(s.km_driven) + ' km</strong>' : '';
+          var exitLine = (s.exit_time ? ' · Cierre: ' + esc(s.exit_time) : '') +
+            (s.exit_km !== null ? ' · ' + esc(s.exit_km) + ' km' : '');
+          stateEl.innerHTML = '<p><strong>Día cerrado.</strong> Taxi: ' + esc(s.taxi_identifier || '—') +
+            ' · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + exitLine + kmLine + '</p>' +
+            (closes.length ? closeCardsHtml(closes) : '') +
+            '<button type="button" id="day-edit-btn">Editar día</button>';
+          document.getElementById('day-edit-btn').addEventListener('click', function () {
+            showEditForm(s);
+          });
         }
-      } catch (e) { showMessage(e.message, 'error'); }
-    });
+      } catch (e) { stateEl.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
+    }
+
+    function showEditForm(s) {
+      stateEl.innerHTML = '<form id="day-edit-form" class="row">' + taxiSelect(s.taxi_id) +
+        '<label>Hora de entrada <input name="entry_time" type="time" value="' + esc(s.entry_time || '') + '" required></label>' +
+        '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" value="' + esc(s.entry_km) + '" required></label>' +
+        '<label>Hora de cierre <input name="exit_time" type="time" value="' + esc(s.exit_time || '') + '"></label>' +
+        '<label>Km de cierre <input name="exit_km" type="number" step="0.01" min="0" value="' + (s.exit_km !== null ? esc(s.exit_km) : '') + '"></label>' +
+        '<button type="submit">Guardar día</button></form>';
+      document.getElementById('day-edit-form').addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        var f = ev.target;
+        try {
+          await api('/api/shifts', 'POST', {
+            shift_date: dateInput.value,
+            taxi_id: f.taxi_id.value,
+            entry_time: f.entry_time.value,
+            entry_km: f.entry_km.value,
+            exit_time: f.exit_time.value || null,
+            exit_km: f.exit_km.value === '' ? null : f.exit_km.value,
+          });
+          showMessage('Día guardado.', 'ok');
+          load();
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    }
+
+    dateInput.addEventListener('change', load);
     load();
   }
 
