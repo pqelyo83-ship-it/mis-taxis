@@ -25,6 +25,7 @@
   var currentTab = null;
   var tripsFilter = { date: '', taxi_id: '', driver_id: '' };
   var expensesFilter = { date: '', taxi_id: '', driver_id: '' };
+  var perfDays = 30;
 
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
@@ -303,6 +304,7 @@
 
   function adminTabs() {
     var tabs = [
+      { id: 'resumen', label: 'Resumen' },
       { id: 'report', label: 'Reportes' },
       { id: 'closes', label: 'Cierres' },
       { id: 'taxis', label: 'Taxis' },
@@ -342,6 +344,7 @@
       'close': renderMyClose,
       'closes': renderAllCloses,
       'report': renderReport,
+      'resumen': renderResumen,
       'taxis': renderTaxis,
       'drivers': renderDrivers,
       'company': renderCompany,
@@ -795,6 +798,104 @@
           showMessage('Gasto borrado.', 'ok');
           renderTab();
         } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
+  }
+
+  // ---------- Resumen (página principal del admin) ----------
+
+  async function renderResumen() {
+    var today = todayLocal();
+    var closes = [];
+    try { closes = await api('/api/day-close?date=' + encodeURIComponent(today)); } catch (e) { closes = []; }
+    var drivers = [];
+    try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+
+    var totalHoy = 0, viajesHoy = 0, enCalle = 0;
+    closes.forEach(function (c) {
+      totalHoy += Number(c.total_collected) || 0;
+      viajesHoy += Number(c.trips_count) || 0;
+      if (c.shift_entry_time) enCalle += 1;
+    });
+    var dayRank = closes.slice().sort(function (a, b) { return (Number(b.total_collected) || 0) - (Number(a.total_collected) || 0); });
+    var maxHoy = dayRank.length ? (Number(dayRank[0].total_collected) || 0) : 0;
+    var dayCards = dayRank.map(function (c, i) {
+      var total = Number(c.total_collected) || 0;
+      var pct = maxHoy > 0 ? Math.round(total / maxHoy * 100) : 0;
+      var perKm = (c.km_driven && Number(c.km_driven) > 0) ? money(total / Number(c.km_driven)) + '/km' : '—';
+      var note = '';
+      if (!c.shift_entry_time) note = ' · Sin jornada';
+      else if (!c.shift_exit_time) note = ' · Jornada abierta';
+      return '<div class="card"><p><strong>#' + (i + 1) + ' ' + esc(c.driver_name) + '</strong>' +
+        (i === 0 && total > 0 ? ' · <strong>Mejor del día</strong>' : '') +
+        ' · ' + money(total) + ' · ' + esc(c.trips_count) + ' viajes · ' + perKm + note + '</p>' +
+        '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
+    }).join('');
+
+    var kmAlerts = closes.filter(function (c) { return c.km_alert; });
+    var openShifts = closes.filter(function (c) { return c.shift_entry_time && !c.shift_exit_time; });
+    var missing = closes.filter(function (c) { return !c.shift_entry_time; });
+    var alertHtml = '';
+    if (!kmAlerts.length && !openShifts.length && !missing.length) {
+      alertHtml = '<p class="ok">Sin alertas hoy.</p>';
+    } else {
+      if (kmAlerts.length) alertHtml += '<p>⚠ Alerta de km: ' + kmAlerts.map(function (c) { return esc(c.driver_name) + ' (' + esc(c.shift_taxi || '') + ', +' + esc(c.km_over) + ' km)'; }).join(', ') + '</p>';
+      if (openShifts.length) alertHtml += '<p>Jornadas sin cerrar: ' + openShifts.map(function (c) { return esc(c.driver_name); }).join(', ') + '</p>';
+      if (missing.length) alertHtml += '<p>Sin jornada hoy: ' + missing.map(function (c) { return esc(c.driver_name); }).join(', ') + '</p>';
+    }
+
+    var from = daysAgoLocal(perfDays === 7 ? 6 : 29);
+    var rep = null;
+    try { rep = await api('/api/report?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(today)); } catch (e) { rep = null; }
+    var perfCards = '<p class="muted">Sin datos del período.</p>';
+    if (rep && rep.per_driver) {
+      var byId = {};
+      rep.per_driver.forEach(function (r) { byId[r.driver_id] = r; });
+      var seen = {};
+      var rows = drivers.map(function (d) {
+        seen[d.id] = true;
+        var r = byId[d.id];
+        return { name: d.name, total: r ? Number(r.total) : 0, trips: r ? Number(r.trips) : 0, per_km: r ? r.per_km : null };
+      });
+      rep.per_driver.forEach(function (r) {
+        if (!seen[r.driver_id]) rows.push({ name: r.driver_name, total: Number(r.total), trips: Number(r.trips), per_km: r.per_km });
+      });
+      rows.sort(function (a, b) { return b.total - a.total; });
+      var maxPerf = rows.length ? rows[0].total : 0;
+      perfCards = rows.map(function (r, i) {
+        var pct = maxPerf > 0 ? Math.round(r.total / maxPerf * 100) : 0;
+        return '<div class="card"><p><strong>#' + (i + 1) + ' ' + esc(r.name) + '</strong>' +
+          (i === 0 && r.total > 0 ? ' · <strong>Mejor desempeño</strong>' : '') +
+          ' · ' + money(r.total) + ' · ' + esc(r.trips) + ' viajes · ' + (r.per_km !== null && r.per_km !== undefined ? money(r.per_km) + '/km' : '—') + '</p>' +
+          '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
+      }).join('') || '<p class="muted">Sin choferes.</p>';
+    }
+
+    contentEl.innerHTML = '<h2>Resumen</h2>' +
+      '<div class="card"><p class="muted">Hoy, ' + esc(today) + '</p>' +
+      '<p class="big-number">' + money(totalHoy) + '</p>' +
+      '<p>' + esc(viajesHoy) + ' viajes · ' + esc(enCalle) + ' de ' + esc(closes.length) + ' choferes en calle</p></div>' +
+      '<h3>Hoy, por chofer</h3>' + (dayCards || '<p class="muted">Sin choferes.</p>') +
+      '<h3>Alertas de hoy</h3><div class="card">' + alertHtml + '</div>' +
+      '<h3>Desempeño (' + (perfDays === 7 ? 'últimos 7 días' : 'últimos 30 días') + ')</h3>' +
+      '<div class="row"><button type="button" data-perf-days="7"' + (perfDays === 7 ? ' class="chip active"' : ' class="chip"') + '>7 días</button>' +
+      '<button type="button" data-perf-days="30"' + (perfDays === 30 ? ' class="chip active"' : ' class="chip"') + '>30 días</button></div>' +
+      perfCards +
+      '<h3>Ir a</h3><div class="row">' +
+      '<button type="button" data-goto="closes">Cierres</button>' +
+      '<button type="button" data-goto="report">Reportes</button>' +
+      '<button type="button" data-goto="drivers">Choferes</button>' +
+      '<button type="button" data-goto="trips">Viajes</button></div>';
+    contentEl.querySelectorAll('[data-perf-days]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        perfDays = Number(btn.getAttribute('data-perf-days'));
+        renderResumen();
+      });
+    });
+    contentEl.querySelectorAll('[data-goto]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        currentTab = btn.getAttribute('data-goto');
+        buildTabs();
       });
     });
   }
