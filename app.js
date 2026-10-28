@@ -613,7 +613,7 @@
     }).join('');
     var driverFilterHtml = '';
     if (user.role === 'admin') {
-      driverFilterHtml = '<label>Chofer <select name="driver_id"><option value="">Todos los choferes</option>' + drivers.map(function (d) {
+      driverFilterHtml = '<label>Chofer <select name="driver_id"><option value="">Todos los choferes</option>' + drivers.filter(function (d) { return d.active; }).map(function (d) {
         return '<option value="' + d.id + '"' + (String(d.id) === tripsFilter.driver_id ? ' selected' : '') + '>' + esc(d.name) + '</option>';
       }).join('') + '</select></label>';
     }
@@ -833,7 +833,7 @@
     }).join('');
     var driverFilterHtml = '';
     if (user.role === 'admin') {
-      driverFilterHtml = '<label>Chofer <select name="driver_id"><option value="">Todos los choferes</option>' + drivers.map(function (d) {
+      driverFilterHtml = '<label>Chofer <select name="driver_id"><option value="">Todos los choferes</option>' + drivers.filter(function (d) { return d.active; }).map(function (d) {
         return '<option value="' + d.id + '"' + (String(d.id) === expensesFilter.driver_id ? ' selected' : '') + '>' + esc(d.name) + '</option>';
       }).join('') + '</select></label>';
     }
@@ -957,7 +957,7 @@
       var byId = {};
       rep.per_driver.forEach(function (r) { byId[r.driver_id] = r; });
       var seen = {};
-      var rows = drivers.map(function (d) {
+      var rows = drivers.filter(function (d) { return d.active; }).map(function (d) {
         seen[d.id] = true;
         var r = byId[d.id];
         return { name: d.name, total: r ? Number(r.total) : 0, trips: r ? Number(r.trips) : 0, per_km: r ? r.per_km : null };
@@ -1153,7 +1153,7 @@
     try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
     try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
     try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
-    var driverOptions = '<option value="">Todos los choferes</option>' + drivers.map(function (d) {
+    var driverOptions = '<option value="">Todos los choferes</option>' + drivers.filter(function (d) { return d.active; }).map(function (d) {
       return '<option value="' + d.id + '">' + esc(d.name) + '</option>';
     }).join('');
     var taxiOptions = '<option value="">Todos los autos</option>' + taxis.map(function (t) {
@@ -1317,7 +1317,7 @@
     var taxis = [];
     try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
     try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
-    var driverOptions = drivers.map(function (d) {
+    var driverOptions = drivers.filter(function (d) { return d.active; }).map(function (d) {
       return '<option value="' + d.id + '">' + esc(d.name) + '</option>';
     }).join('');
     var taxiOptions = '<option value="">Sin taxi</option>' + taxis.map(function (t) {
