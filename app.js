@@ -1265,6 +1265,72 @@
       a.remove();
       URL.revokeObjectURL(url);
     }
+    async function printReport(rep, form) {
+      var companyName = (typeof user !== 'undefined' && user && user.company_name) ? user.company_name : '';
+      if (!companyName) {
+        try { var c = await api('/api/company'); companyName = c.name || ''; } catch (e) { companyName = ''; }
+      }
+      var t = rep.totals;
+      function pk(v) { return (v !== null && v !== undefined) ? money(v) + '/km' : '—'; }
+      function kmCell(v) { return (v !== null && v !== undefined) ? esc(v) + ' km' : '—'; }
+      function tableHtml(headers, rows) {
+        if (!rows.length) return '<p class="muted">Sin datos en ese período.</p>';
+        return '<table><thead><tr>' + headers.map(function (h) { return '<th>' + h + '</th>'; }).join('') + '</tr></thead><tbody>' +
+          rows.map(function (r) {
+            return '<tr' + (r.hl ? ' class="hl"' : '') + '>' + r.cells.map(function (cell) { return '<td>' + cell + '</td>'; }).join('') + '</tr>';
+          }).join('') + '</tbody></table>';
+      }
+      var perDayRows = rep.per_day.map(function (r) {
+        return { cells: [esc(r.date), esc(r.trips), money(r.total), kmCell(r.km), pk(r.per_km)] };
+      });
+      var perDriverRows = rep.per_driver.map(function (r) {
+        return { cells: [esc(r.driver_name), esc(r.trips), money(r.total), kmCell(r.km), pk(r.per_km)] };
+      });
+      var perTaxiRows = rep.per_taxi.map(function (r) {
+        return { cells: [esc(r.taxi_identifier), esc(r.trips), money(r.total), kmCell(r.km), pk(r.per_km)] };
+      });
+      var perMethodRows = (rep.per_method || []).map(function (r) {
+        return { cells: [esc(r.method_name), esc(r.trips), money(r.total), money(r.driver_keeps)] };
+      });
+      var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Reporte ' + esc(rep.from) + ' al ' + esc(rep.to) + '</title><style>' +
+        'body{font-family:system-ui,Arial,sans-serif;color:#111;max-width:800px;margin:24px auto;padding:0 16px;}' +
+        'h1{font-size:22px;margin:0 0 4px;}h2{font-size:17px;margin:24px 0 8px;border-bottom:2px solid #111;padding-bottom:4px;}' +
+        'table{width:100%;border-collapse:collapse;margin:8px 0 16px;font-size:14px;}' +
+        'th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;}th{background:#f2f2f2;}' +
+        'td:nth-child(n+2),th:nth-child(n+2){text-align:right;}td:first-child,th:first-child{text-align:left;}' +
+        'tr.hl td{font-weight:bold;background:#fef3c7;}' +
+        '.muted{color:#666;font-size:13px;}' +
+        '@media print{.no-print{display:none;}}' +
+        '</style></head><body>' +
+        '<div class="no-print"><button onclick="window.print()">Imprimir / Guardar como PDF</button></div>' +
+        '<h1>' + esc(companyName || 'Mis Taxis') + '</h1>' +
+        '<p><strong>Reporte del ' + esc(rep.from) + ' al ' + esc(rep.to) + '</strong><br>' +
+        'Chofer: ' + esc(filterLabel(form.driver_id)) + ' · Auto: ' + esc(filterLabel(form.taxi_id)) + ' · Método de pago: ' + esc(filterLabel(form.payment_method_id)) + '</p>' +
+        '<h2>Resumen</h2>' + tableHtml(['Concepto', 'Monto'], [
+          { cells: ['Total recaudado', money(t.total)] },
+          { cells: ['Se quedan los choferes', money(t.driver_keeps)] },
+          { cells: ['Parte del dueño (antes de gastos)', money(t.owner_share_gross)] },
+          { cells: ['Gastos', money(t.expenses)] },
+          { cells: ['Deben entregar al dueño', money(t.handover_to_owner)], hl: true },
+          { cells: ['Viajes', esc(t.trips_count)] },
+          { cells: ['Km recorridos', esc(t.km) + ' km'] },
+          { cells: ['Días con jornada cerrada', esc(t.days_with_km)] },
+          { cells: ['Dinero por km promedio', pk(t.avg_per_km)] },
+        ]) +
+        '<h2>Por día</h2>' + tableHtml(['Fecha', 'Viajes', 'Recaudado', 'Km', '$/km'], perDayRows) +
+        (!form.driver_id.value ? '<h2>Por chofer</h2>' + tableHtml(['Chofer', 'Viajes', 'Recaudado', 'Km', '$/km'], perDriverRows) : '') +
+        (!form.taxi_id.value ? '<h2>Por auto</h2>' + tableHtml(['Auto', 'Viajes', 'Recaudado', 'Km', '$/km'], perTaxiRows) : '') +
+        (perMethodRows.length ? '<h2>Por método de pago</h2>' + tableHtml(['Método', 'Viajes', 'Recaudado', 'Se quedan los choferes'], perMethodRows) : '') +
+        '<p class="muted">Cómo se calcula: Total recaudado − Se quedan los choferes − Gastos = Deben entregar al dueño.</p>' +
+        '<p class="muted">El $/km se calcula solo sobre días con jornada cerrada; los días sin jornada no entran en el promedio. Las celdas con — son días, choferes o autos sin jornada cerrada en el período.</p>' +
+        (form.taxi_id.value ? '<p class="muted">Con filtro de auto, los gastos se asignan según el taxi del día de cada gasto.</p>' : '') +
+        '<p class="muted">Reporte generado el ' + esc(todayLocal()) + '.</p>' +
+        '</body></html>';
+      var w = window.open('', '_blank');
+      if (!w) { showMessage('Permitir ventanas emergentes para ver el reporte imprimible.', 'error'); return; }
+      w.document.write(html);
+      w.document.close();
+    }
 
     async function search() {
       var q = 'from=' + encodeURIComponent(form.from.value) + '&to=' + encodeURIComponent(form.to.value);
@@ -1284,6 +1350,7 @@
           (form.taxi_id.value ? ' Gastos asignados al auto según el taxi del día de cada gasto.' : '') + '</p></div>' +
           '<button type="button" id="report-csv-btn">Descargar CSV</button>' +
           '<button type="button" id="report-zip-btn">Descargar facturas (ZIP)</button>' +
+          '<button type="button" id="report-print-btn">Imprimir reporte</button>' +
           '<h3>Por día</h3>' + dayRows(rep.per_day);
         if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; });
         if (!form.taxi_id.value) html += '<h3>Por auto</h3>' + breakdownRows(rep.per_taxi, function (r) { return r.taxi_identifier; });
@@ -1298,6 +1365,8 @@
         if (csvBtn) csvBtn.addEventListener('click', function () { downloadReportCsv(rep, form); });
         var zipBtn = document.getElementById('report-zip-btn');
         if (zipBtn) zipBtn.addEventListener('click', function () { downloadReceiptsZip(); });
+        var printBtn = document.getElementById('report-print-btn');
+        if (printBtn) printBtn.addEventListener('click', function () { printReport(rep, form); });
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
     }
 
