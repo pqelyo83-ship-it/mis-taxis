@@ -1194,38 +1194,68 @@
       var s = String(v === null || v === undefined ? '' : v);
       return '"' + s.replace(/"/g, '""') + '"';
     }
-    function downloadReportCsv(rep) {
+    function filterLabel(select) {
+      if (!select || !select.options || select.selectedIndex < 0) return 'Todos';
+      return select.options[select.selectedIndex].text;
+    }
+    function downloadReportCsv(rep, form) {
       var lines = [];
       var t = rep.totals;
-      lines.push('Reporte,' + csvCell(rep.from + ' al ' + rep.to));
-      lines.push('Total recaudado,' + t.total);
-      lines.push('Viajes,' + t.trips_count);
-      lines.push('Km recorridos,' + t.km);
-      lines.push('Dinero por km promedio,' + (t.avg_per_km !== null ? t.avg_per_km : ''));
-      lines.push('Se quedan los choferes,' + t.driver_keeps);
-      lines.push('Gastos,' + t.expenses);
-      lines.push('Deben entregar,' + t.handover_to_owner);
+      function row() { return Array.prototype.slice.call(arguments).join(','); }
+      lines.push(row('Reporte de Mis Taxis'));
+      lines.push(row('Periodo', csvCell(rep.from + ' al ' + rep.to)));
+      lines.push(row('Chofer', csvCell(filterLabel(form.driver_id))));
+      lines.push(row('Auto', csvCell(filterLabel(form.taxi_id))));
+      lines.push(row('Metodo de pago', csvCell(filterLabel(form.payment_method_id))));
       lines.push('');
-      lines.push('Por dia,Fecha,Viajes,Recaudado,Km,$/km');
+      lines.push(row('TOTALES DEL PERIODO'));
+      lines.push(row('Concepto', 'Monto ($)'));
+      lines.push(row('Total recaudado', t.total));
+      lines.push(row('Se quedan los choferes', t.driver_keeps));
+      lines.push(row('Parte del dueno (antes de gastos)', t.owner_share_gross));
+      lines.push(row('Gastos', t.expenses));
+      lines.push(row('Deben entregar al dueno', t.handover_to_owner));
+      lines.push(row('Viajes', t.trips_count));
+      lines.push(row('Km recorridos (km)', t.km));
+      lines.push(row('Dias con jornada cerrada', t.days_with_km));
+      lines.push(row('Dinero por km promedio ($/km)', t.avg_per_km !== null ? t.avg_per_km : ''));
+      lines.push('');
+      lines.push(row('Como se calcula: Total recaudado - Se quedan los choferes - Gastos = Deben entregar al dueno.'));
+      lines.push(row('El $/km se calcula solo sobre dias con jornada cerrada; los dias sin jornada no entran en el promedio.'));
+      if (form.taxi_id.value) lines.push(row('Con filtro de auto, los gastos se asignan segun el taxi del dia de cada gasto.'));
+      lines.push('');
+      lines.push(row('POR DIA'));
+      lines.push(row('Fecha', 'Viajes', 'Recaudado ($)', 'Km (km)', '$/km ($)'));
       rep.per_day.forEach(function (r) {
-        lines.push(['Por dia', r.date, r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''].join(','));
+        lines.push(row(r.date, r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''));
       });
+      if (!form.driver_id.value) {
+        lines.push('');
+        lines.push(row('POR CHOFER'));
+        lines.push(row('Chofer', 'Viajes', 'Recaudado ($)', 'Km (km)', '$/km ($)'));
+        rep.per_driver.forEach(function (r) {
+          lines.push(row(csvCell(r.driver_name), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''));
+        });
+      }
+      if (!form.taxi_id.value) {
+        lines.push('');
+        lines.push(row('POR AUTO'));
+        lines.push(row('Auto', 'Viajes', 'Recaudado ($)', 'Km (km)', '$/km ($)'));
+        rep.per_taxi.forEach(function (r) {
+          lines.push(row(csvCell(r.taxi_identifier), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''));
+        });
+      }
+      if (rep.per_method && rep.per_method.length) {
+        lines.push('');
+        lines.push(row('POR METODO DE PAGO'));
+        lines.push(row('Metodo', 'Viajes', 'Recaudado ($)', 'Se quedan los choferes ($)'));
+        rep.per_method.forEach(function (r) {
+          lines.push(row(csvCell(r.method_name), r.trips, r.total, r.driver_keeps));
+        });
+      }
       lines.push('');
-      lines.push('Por chofer,Chofer,Viajes,Recaudado,Km,$/km');
-      rep.per_driver.forEach(function (r) {
-        lines.push(['Por chofer', csvCell(r.driver_name), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''].join(','));
-      });
-      lines.push('');
-      lines.push('Por auto,Auto,Viajes,Recaudado,Km,$/km');
-      rep.per_taxi.forEach(function (r) {
-        lines.push(['Por auto', csvCell(r.taxi_identifier), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''].join(','));
-      });
-      lines.push('');
-      lines.push('Por metodo de pago,Metodo,Viajes,Recaudado,Se quedan los choferes');
-      (rep.per_method || []).forEach(function (r) {
-        lines.push(['Por metodo de pago', csvCell(r.method_name), r.trips, r.total, r.driver_keeps].join(','));
-      });
-      var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      lines.push(row('Nota: las celdas vacias de Km y $/km son dias, choferes o autos sin jornada cerrada en el periodo.'));
+      var blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
@@ -1265,7 +1295,7 @@
         }
         result.innerHTML = html;
         var csvBtn = document.getElementById('report-csv-btn');
-        if (csvBtn) csvBtn.addEventListener('click', function () { downloadReportCsv(rep); });
+        if (csvBtn) csvBtn.addEventListener('click', function () { downloadReportCsv(rep, form); });
         var zipBtn = document.getElementById('report-zip-btn');
         if (zipBtn) zipBtn.addEventListener('click', function () { downloadReceiptsZip(); });
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
