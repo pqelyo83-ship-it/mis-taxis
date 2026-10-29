@@ -732,7 +732,7 @@
     var stateEl = document.getElementById('day-state');
 
     function taxiSelect(selectedId) {
-      return '<label>Taxi del día <select name="taxi_id">' + taxis.map(function (t) {
+      return '<label>Taxi del día <select name="taxi_id" required><option value="">Elegí el taxi…</option>' + taxis.map(function (t) {
         return '<option value="' + t.id + '"' + (selectedId === t.id ? ' selected' : '') + '>' + esc(t.identifier) + '</option>';
       }).join('') + '</select></label>';
     }
@@ -764,6 +764,12 @@
           document.getElementById('day-start-form').addEventListener('submit', async function (ev) {
             ev.preventDefault();
             var f = ev.target;
+            // Fecha, taxi y km son obligatorios. La fecha vive fuera del
+            // formulario (el required de HTML no la frena) y el taxi ya
+            // no puede quedar vacío ni caer en el primero de la lista
+            // sin que el chofer lo elija. Hora y km ya eran required.
+            if (!date) { showMessage('Elegí la fecha del día.', 'error'); return; }
+            if (!f.taxi_id.value) { showMessage('Elegí el taxi del día.', 'error'); return; }
             // Aviso si otro chofer ya tiene abierta la jornada de este taxi
             // hoy: se nombra al chofer y se pide confirmación antes de abrir
             // una segunda jornada en el mismo auto.
@@ -1089,6 +1095,24 @@
     var tripGeo = null;
     var methods = [];
     try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
+    // Chofer sin día empezado hoy: no se muestra el formulario y se lo
+    // manda a empezar el día. Si la consulta falla, se muestra el
+    // formulario igual y el backend rechaza el viaje si no hay jornada.
+    // El admin siempre ve el formulario (carga y corrige cualquier día).
+    if (user.role === 'driver') {
+      var todayShifts = null;
+      try { todayShifts = await api('/api/shifts?date=' + encodeURIComponent(todayLocal())); } catch (e) { todayShifts = null; }
+      if (todayShifts !== null && !todayShifts.length) {
+        contentEl.innerHTML = '<h2>Nuevo viaje</h2><p>Para cargar viajes primero tenés que empezar el día.</p><p><button type="button" data-goto="day">Empezar el día</button></p>';
+        contentEl.querySelectorAll('[data-goto]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            currentTab = btn.getAttribute('data-goto');
+            buildTabs();
+          });
+        });
+        return;
+      }
+    }
     contentEl.innerHTML = tripFormHtml(methods);
     captureLocation(function (geo) {
       tripGeo = geo;
@@ -2067,7 +2091,7 @@
     var driverOptions = drivers.filter(function (d) { return d.active; }).map(function (d) {
       return '<option value="' + d.id + '">' + esc(d.name) + '</option>';
     }).join('');
-    var taxiOptions = '<option value="">Sin taxi</option>' + taxis.map(function (t) {
+    var taxiOptions = '<option value="">Elegí el taxi…</option>' + taxis.map(function (t) {
       return '<option value="' + t.id + '">' + esc(t.identifier) + '</option>';
     }).join('');
     contentEl.innerHTML = '<h2>Cierres del día (todos los choferes)</h2><form id="close-form" class="row">' +
@@ -2077,7 +2101,7 @@
       '<h3>Cargar o corregir jornada</h3><form id="shift-form" class="row">' +
       '<label>Chofer <select name="driver_id">' + driverOptions + '</select></label>' +
       '<label>Fecha <input name="shift_date" type="date" value="' + todayLocal() + '" required></label>' +
-      '<label>Taxi del día <select name="taxi_id">' + taxiOptions + '</select></label>' +
+      '<label>Taxi del día <select name="taxi_id" required>' + taxiOptions + '</select></label>' +
       '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
       '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
       '<label>Hora de cierre <input name="exit_time" type="time"></label>' +
@@ -2108,6 +2132,7 @@
     var shiftForm = document.getElementById('shift-form');
     shiftForm.addEventListener('submit', async function (ev) {
       ev.preventDefault();
+      if (!shiftForm.taxi_id.value) { showMessage('Elegí el taxi del día.', 'error'); return; }
       if (!kmCierreValido(shiftForm.entry_km.value, shiftForm.exit_km.value)) return;
       try {
         await api('/api/shifts', 'POST', {

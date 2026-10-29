@@ -230,6 +230,17 @@ module.exports = async function handler(req, res) {
     return;
   }
   const taxiId = body.taxi_id ? Number(body.taxi_id) : null;
+  // El taxi es obligatorio al abrir el día: sin taxi no hay jornada.
+  // Además debe ser un taxi de la empresa del chofer.
+  if (!taxiId) {
+    res.status(400).json({ error: 'Elegí el taxi del día' });
+    return;
+  }
+  const taxi = await pool.query('SELECT id FROM taxis WHERE id = $1 AND company_id = $2', [taxiId, driver.rows[0].company_id]);
+  if (!taxi.rows[0]) {
+    res.status(400).json({ error: 'Taxi inválido' });
+    return;
+  }
   // Ubicación opcional (el teléfono la comparte solo con permiso).
   const entryGeo = geoPair(body.entry_lat, body.entry_lng);
   const exitGeo = geoPair(body.exit_lat, body.exit_lng);

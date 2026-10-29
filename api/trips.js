@@ -213,6 +213,20 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Datos del viaje inválidos (revisá fecha y monto)' });
       return;
     }
+    // Sin día empezado no hay viaje: el chofer solo carga viajes de un
+    // día con jornada (abierta o cerrada). El admin puede cargar y
+    // corregir para cualquier chofer y fecha. Editar un viaje viejo no
+    // se bloquea: el día ya se empezó en su momento.
+    if (user.role === 'driver') {
+      const shift = await pool.query(
+        'SELECT id FROM day_shifts WHERE driver_id = $1 AND shift_date = $2 AND company_id = $3',
+        [driverId, body.trip_date, driver.rows[0].company_id]
+      );
+      if (!shift.rows[0]) {
+        res.status(400).json({ error: 'Primero tenés que empezar el día para cargar viajes' });
+        return;
+      }
+    }
     // El taxi del viaje: el de la jornada de ese día, si hay una;
     // si no, el taxi asignado al chofer. Los viajes ya no llevan horas ni km.
     let taxiId = body.taxi_id ? Number(body.taxi_id) : null;
