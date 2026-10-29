@@ -2084,6 +2084,37 @@
     function perKmCell(v) {
       return v !== null && v !== undefined ? money(v) + '/km' : '—';
     }
+    // Gráfica de efectivo por km por chofer (solo frontend, usa los
+    // datos del reporte ya buscado). Efectivo por km = efectivo (solo
+    // viajes con método Efectivo) / km de jornadas cerradas del
+    // período. Es la versión en efectivo del $/km de la tabla (que usa
+    // el recaudado total). Ordenada de mayor a menor; los choferes sin
+    // km cerrado aparecen sin barra. Las barras reutilizan .perf-bar,
+    // igual que el ranking del Resumen.
+    function graficaEfectivoKmPorChofer(rows, withMethodFilter) {
+      var data = (rows || []).map(function (r) {
+        var km = Number(r.km) || 0;
+        var cash = Number(r.cash_total) || 0;
+        return { name: r.driver_name, trips: r.trips, km: km, cash: cash,
+          value: km > 0 ? Math.round((cash / km + Number.EPSILON) * 100) / 100 : null };
+      });
+      if (!data.length) return '<p class="muted">Sin datos en ese período.</p>';
+      var conBarra = data.filter(function (d) { return d.value !== null; }).sort(function (a, b) { return b.value - a.value; });
+      var sinKm = data.filter(function (d) { return d.value === null; });
+      var max = conBarra.length ? conBarra[0].value : 0;
+      var html = conBarra.map(function (d) {
+        var pct = max > 0 ? Math.round((d.value / max) * 100) : 0;
+        return '<p><strong>' + esc(d.name) + '</strong> · ' + money(d.value) + '/km en efectivo</p>' +
+          '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div>' +
+          '<p class="muted">Km: ' + esc(d.km) + ' km · Efectivo: ' + money(d.cash) + ' · Viajes: ' + esc(d.trips) + '</p>';
+      }).join('');
+      sinKm.forEach(function (d) {
+        html += '<p><strong>' + esc(d.name) + '</strong> · — sin km cerrado en el período</p>' +
+          '<p class="muted">Efectivo: ' + money(d.cash) + ' · Viajes: ' + esc(d.trips) + '</p>';
+      });
+      return html + '<p class="muted">Efectivo por km = efectivo (solo viajes con método Efectivo) / km de jornadas cerradas del período. Las barras se comparan entre choferes, no son una meta.' +
+        (withMethodFilter ? ' Con filtro de método, el efectivo corresponde a ese método.' : '') + '</p>';
+    }
     // Rentabilidad de un taxi. Neto = recaudado - gastos (todos los
     // gastos del auto, incluido el combustible, siempre por monto, como
     // cualquier otro gasto). $/km = neto / km; si km <= 0 no se divide
@@ -2365,7 +2396,8 @@
           '<button type="button" id="report-zip-btn">Descargar facturas (ZIP)</button>' +
           '<button type="button" id="report-print-btn">Imprimir reporte</button>' +
           '<h3>Por día</h3>' + dayRows(rep.per_day, hasCredit);
-        if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; }, true, hasCredit);
+        if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; }, true, hasCredit) +
+          '<h3>Gráfica: efectivo por km por chofer</h3>' + graficaEfectivoKmPorChofer(rep.per_driver, !!form.payment_method_id.value);
         if (!form.taxi_id.value) html += '<h3>Por auto</h3>' + breakdownRows(rep.per_taxi, function (r) { return r.taxi_identifier; });
         var rentabilidadHtml = '';
         try {
