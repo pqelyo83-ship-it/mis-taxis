@@ -31,6 +31,7 @@ function withKm(row) {
     entry_lng: row.entry_lng,
     exit_lat: row.exit_lat,
     exit_lng: row.exit_lng,
+    note: row.note || null,
     km_driven: km,
     created_at: row.created_at,
   };
@@ -68,6 +69,34 @@ module.exports = async function handler(req, res) {
   const pool = getPool();
 
   if (req.method === 'GET') {
+    // Jornadas abiertas de un taxi en un día (?open_taxi=<id>&date=AAAA-MM-DD).
+    // Lo usa el aviso de "Empezar día": si otro chofer ya tiene abierta la
+    // jornada de ese taxi, el que empieza ve su nombre y confirma.
+    // Devuelve solo lo mínimo (chofer y taxi); el chofer no ve jornadas de
+    // otros salvo este aviso puntual. Abierta = sin km de cierre.
+    if (req.query && req.query.open_taxi) {
+      const taxiId = Number(req.query.open_taxi);
+      const date = req.query.date ? String(req.query.date) : '';
+      if (!taxiId || !date) {
+        res.status(400).json({ error: 'Faltan taxi y fecha' });
+        return;
+      }
+      const params = [user.company_id, taxiId, date];
+      let openSql = `SELECT s.driver_id, u.name AS driver_name, s.taxi_id, t.identifier AS taxi_identifier, s.shift_date
+        FROM day_shifts s JOIN users u ON u.id = s.driver_id
+        LEFT JOIN taxis t ON t.id = s.taxi_id
+        WHERE s.company_id = $1 AND s.taxi_id = $2 AND s.shift_date = $3 AND s.exit_km IS NULL`;
+      if (user.role === 'driver') {
+        params.push(user.id);
+        openSql += ' AND s.driver_id <> $' + params.length;
+      }
+      openSql += ' ORDER BY s.id';
+      const open = await pool.query(openSql, params);
+      res.status(200).json(open.rows.map(function (r) {
+        return { driver_id: r.driver_id, driver_name: r.driver_name, taxi_id: r.taxi_id, taxi_identifier: r.taxi_identifier, shift_date: dateStr(r.shift_date) };
+      }));
+      return;
+    }
     const conditions = [];
     const params = [];
     // Aislamiento por empresa: siempre.
@@ -112,22 +141,57 @@ module.exports = async function handler(req, res) {
   // Ubicación opcional (el teléfono la comparte solo con permiso).
   const entryGeo = geoPair(body.entry_lat, body.entry_lng);
   const exitGeo = geoPair(body.exit_lat, body.exit_lng);
-  const saved = await pool.query(
-    `INSERT INTO day_shifts (company_id, driver_id, shift_date, taxi_id, entry_time, entry_km, exit_time, exit_km, entry_lat, entry_lng, exit_lat, exit_lng)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-     ON CONFLICT (driver_id, shift_date) DO UPDATE
-       SET taxi_id = EXCLUDED.taxi_id, entry_time = EXCLUDED.entry_time,
-           entry_km = EXCLUDED.entry_km, exit_time = EXCLUDED.exit_time,
-           exit_km = EXCLUDED.exit_km,
-           entry_lat = COALESCE(EXCLUDED.entry_lat, day_shifts.entry_lat),
-           entry_lng = COALESCE(EXCLUDED.entry_lng, day_shifts.entry_lng),
-           exit_lat = COALESCE(EXCLUDED.exit_lat, day_shifts.exit_lat),
-           exit_lng = COALESCE(EXCLUDED.exit_lng, day_shifts.exit_lng)
-     RETURNING *`,
-    [driver.rows[0].company_id, driverId, body.shift_date, taxiId, body.entry_time, entryKm, exitTime, exitKm,
-     entryGeo ? entryGeo.lat : null, entryGeo ? entryGeo.lng : null,
-     exitGeo ? exitGeo.lat : null, exitGeo ? exitGeo.lng : null]
-  );
+  // Aclaraciones del día (opcional): solo se tocan si vienen en el body.
+  // Si no vienen (por ejemplo, el formulario del admin), se conserva la
+  // anterior; si vienen vacías, se borran. Tope de 1000 caracteres.
+  const noteProvided = typeof body.note === 'string';
+  const noteValue = noteProvided ? body.note.trim().slice(0, 1000) : null;
+  const baseParams = [driver.rows[0].company_id, driverId, body.shift_date, taxiId, body.entry_time, entryKm, exitTime, exitKm,
+    entryGeo ? entryGeo.lat : null, entryGeo ? entryGeo.lng : null,
+    exitGeo ? exitGeo.lat : null, exitGeo ? exitGeo.lng : null];
+  async function saveShift(withNote) {
+    if (!withNote) {
+      return pool.query(
+        `INSERT INTO day_shifts (company_id, driver_id, shift_date, taxi_id, entry_time, entry_km, exit_time, exit_km, entry_lat, entry_lng, exit_lat, exit_lng)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (driver_id, shift_date) DO UPDATE
+           SET taxi_id = EXCLUDED.taxi_id, entry_time = EXCLUDED.entry_time,
+               entry_km = EXCLUDED.entry_km, exit_time = EXCLUDED.exit_time,
+               exit_km = EXCLUDED.exit_km,
+               entry_lat = COALESCE(EXCLUDED.entry_lat, day_shifts.entry_lat),
+               entry_lng = COALESCE(EXCLUDED.entry_lng, day_shifts.entry_lng),
+               exit_lat = COALESCE(EXCLUDED.exit_lat, day_shifts.exit_lat),
+               exit_lng = COALESCE(EXCLUDED.exit_lng, day_shifts.exit_lng)
+         RETURNING *`,
+        baseParams
+      );
+    }
+    return pool.query(
+      `INSERT INTO day_shifts (company_id, driver_id, shift_date, taxi_id, entry_time, entry_km, exit_time, exit_km, entry_lat, entry_lng, exit_lat, exit_lng, note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (driver_id, shift_date) DO UPDATE
+         SET taxi_id = EXCLUDED.taxi_id, entry_time = EXCLUDED.entry_time,
+             entry_km = EXCLUDED.entry_km, exit_time = EXCLUDED.exit_time,
+             exit_km = EXCLUDED.exit_km,
+             entry_lat = COALESCE(EXCLUDED.entry_lat, day_shifts.entry_lat),
+             entry_lng = COALESCE(EXCLUDED.entry_lng, day_shifts.entry_lng),
+             exit_lat = COALESCE(EXCLUDED.exit_lat, day_shifts.exit_lat),
+             exit_lng = COALESCE(EXCLUDED.exit_lng, day_shifts.exit_lng),
+             note = COALESCE(EXCLUDED.note, day_shifts.note)
+       RETURNING *`,
+      baseParams.concat([noteValue])
+    );
+  }
+  // Si la migración v8 todavía no se aplicó, la columna note no existe:
+  // en ese caso se guarda la jornada igual (sin aclaraciones) en vez de
+  // trabar el inicio o el cierre del día.
+  let saved;
+  try {
+    saved = await saveShift(true);
+  } catch (e) {
+    if (e && e.code === '42703') saved = await saveShift(false);
+    else throw e;
+  }
   const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [saved.rows[0].id]);
   res.status(200).json(withKm(full.rows[0]));
 };

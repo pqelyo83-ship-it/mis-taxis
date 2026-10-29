@@ -23,8 +23,8 @@
   var userBar = document.getElementById('user-bar');
   var loginError = document.getElementById('login-error');
   var currentTab = null;
-  var tripsFilter = { date: '', taxi_id: '', driver_id: '' };
-  var expensesFilter = { date: '', taxi_id: '', driver_id: '' };
+  var tripsFilter = { date: todayLocal(), taxi_id: '', driver_id: '' };
+  var expensesFilter = { date: todayLocal(), taxi_id: '', driver_id: '' };
   var tripsShowAll = false;
   var expensesShowAll = false;
   var perfDays = 30;
@@ -38,6 +38,31 @@
 
   function money(n) {
     return '$' + Number(n || 0).toFixed(2);
+  }
+
+  // Línea del desglose por método de pago de un cierre (day-close): cada
+  // método con su total; los viajes sin método se marcan como sin clasificar
+  // porque no entran en el efectivo que el chofer entrega en mano.
+  function methodsLine(c) {
+    if (!c.methods || !c.methods.length) return '';
+    var parts = c.methods.map(function (m) {
+      var name = m.method_name || 'Sin método';
+      return esc(name) + ' ' + money(m.total) + (m.method_name ? '' : ' (sin clasificar, no entra en el efectivo)');
+    });
+    return '<p class="muted">Por método: ' + parts.join(' · ') + '</p>';
+  }
+
+  // Línea de entrega en efectivo de un cierre (day-close). Solo el efectivo
+  // entra al chofer; si la cuenta da negativa, el dueño le debe al chofer.
+  // Si la API todavía no trae handover_cash, se muestra la cuenta vieja.
+  function handoverCashLine(c, ownerOwesLabel) {
+    if (c.handover_cash === null || c.handover_cash === undefined) {
+      return 'Debe entregar: <strong>' + money(c.handover_to_owner) + '</strong>';
+    }
+    if (Number(c.handover_cash) < 0) {
+      return esc(ownerOwesLabel) + ': <strong>' + money(-Number(c.handover_cash)) + '</strong>';
+    }
+    return 'Debe entregar en efectivo: <strong>' + money(c.handover_cash) + '</strong>';
   }
 
   function todayLocal() {
@@ -389,7 +414,7 @@
         '<p>Total facturado</p><p class="big-number">' + money(mine.total_collected) + '</p>' +
         '<p>Te quedás: <strong>' + money(mine.driver_keeps) + '</strong></p>' +
         '<p>Gastos: ' + money(mine.expenses) + '</p>' +
-        '<p>Debés entregar: <strong>' + money(mine.handover_to_owner) + '</strong></p></div>';
+        '<p>' + handoverCashLine(mine, 'El dueño te debe') + '</p>' + methodsLine(mine) + '</div>';
     }
     var chartHtml = '';
     try {
@@ -422,6 +447,8 @@
     contentEl.innerHTML = '<h2>Inicio</h2>' +
       '<form id="inicio-date-form" class="row"><label>Ver día <input name="date" type="date" value="' + esc(effDate) + '"></label><button type="submit">Ver</button></form>' +
       dayCard + chartHtml +
+      '<p><button type="button" id="switch-driver-btn">Cambiar de chofer</button></p>' +
+      '<p class="muted">Si otro chofer agarra este teléfono, cambiá de usuario en un toque: volvés al ingreso de la empresa y elegís tu nombre + PIN.</p>' +
       '<h3>Ir a</h3><div class="row">' +
       '<button type="button" data-goto="day">Mi día</button>' +
       '<button type="button" data-goto="new-trip">Nuevo viaje</button>' +
@@ -433,6 +460,21 @@
       ev.preventDefault();
       inicioDate = dateForm.date.value || '';
       renderInicio();
+    });
+    var switchBtn = document.getElementById('switch-driver-btn');
+    if (switchBtn) switchBtn.addEventListener('click', function () {
+      // Cambiar de chofer en un teléfono compartido: se cierra la sesión y
+      // se vuelve al ingreso de la empresa (sin usuario fijo), así el
+      // próximo chofer solo elige su nombre + PIN. La URL se deja solo con
+      // ?company= si la había; showLogin ya resuelve empresa fija o lista.
+      try {
+        var params = new URLSearchParams(window.location.search);
+        var code = params.get('company');
+        window.history.replaceState(null, '', window.location.pathname + (code ? '?company=' + encodeURIComponent(code) : ''));
+      } catch (e) { /* si no se puede, el ingreso igual muestra la empresa */ }
+      currentTab = null;
+      inicioDate = '';
+      logout();
     });
     contentEl.querySelectorAll('[data-goto]').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -485,6 +527,18 @@
           document.getElementById('day-start-form').addEventListener('submit', async function (ev) {
             ev.preventDefault();
             var f = ev.target;
+            // Aviso si otro chofer ya tiene abierta la jornada de este taxi
+            // hoy: se nombra al chofer y se pide confirmación antes de abrir
+            // una segunda jornada en el mismo auto.
+            try {
+              var open = [];
+              try { open = await api('/api/shifts?open_taxi=' + encodeURIComponent(f.taxi_id.value) + '&date=' + encodeURIComponent(date)); } catch (e) { open = []; }
+              if (open.length) {
+                var taxiName = (taxis.find(function (t) { return String(t.id) === String(f.taxi_id.value); }) || {}).identifier || 'elegido';
+                var names = open.map(function (o) { return o.driver_name; }).join(', ');
+                if (!confirm('El taxi ' + taxiName + ' ya tiene jornada abierta hoy por ' + names + '. ¿Igual querés empezar tu día en este taxi?')) return;
+              }
+            } catch (e) { /* sin aviso, se sigue igual */ }
             var body = {
               shift_date: date,
               taxi_id: f.taxi_id.value,
@@ -508,6 +562,7 @@
             '<form id="day-close-form" class="row">' +
             '<label>Hora de cierre <input name="exit_time" type="time" value="' + nowTimeLocal() + '" required></label>' +
             '<label>Km con el que queda el auto <input name="exit_km" type="number" step="0.01" min="0" required></label>' +
+            '<label>Aclaraciones (opcional) <textarea name="note" rows="2" placeholder="Ej: llevé el auto a service, fui a hacer mandados"></textarea></label>' +
             '<button type="submit">Cerrar el día</button></form>' +
             '<p class="muted" id="day-geo-status">Detectando ubicación…</p>';
           captureLocation(function (geo) {
@@ -525,6 +580,7 @@
               entry_km: s.entry_km,
               exit_time: f.exit_time.value,
               exit_km: f.exit_km.value,
+              note: f.note.value,
             };
             if (exitGeo) { body.exit_lat = exitGeo.lat; body.exit_lng = exitGeo.lng; }
             try {
@@ -557,6 +613,7 @@
         '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" value="' + esc(s.entry_km) + '" required></label>' +
         '<label>Hora de cierre <input name="exit_time" type="time" value="' + esc(s.exit_time || '') + '"></label>' +
         '<label>Km de cierre <input name="exit_km" type="number" step="0.01" min="0" value="' + (s.exit_km !== null ? esc(s.exit_km) : '') + '"></label>' +
+        '<label>Aclaraciones (opcional) <textarea name="note" rows="2" placeholder="Ej: llevé el auto a service, fui a hacer mandados">' + esc(s.note || '') + '</textarea></label>' +
         '<button type="submit">Guardar día</button></form>';
       document.getElementById('day-edit-form').addEventListener('submit', async function (ev) {
         ev.preventDefault();
@@ -569,6 +626,7 @@
             entry_km: f.entry_km.value,
             exit_time: f.exit_time.value || null,
             exit_km: f.exit_km.value === '' ? null : f.exit_km.value,
+            note: f.note.value,
           });
           showMessage('Día guardado.', 'ok');
           load();
@@ -623,8 +681,8 @@
       driverFilterHtml +
       '<button type="button" id="trips-filter-clear">Limpiar filtros</button></form>';
     var limitRow = tripsShowAll
-      ? '<p><button type="button" id="trips-show-less">Ver últimos 100</button></p>'
-      : '<p class="muted">Mostrando los últimos 100 viajes. <button type="button" id="trips-show-all">Ver todos</button></p>';
+      ? '<p><button type="button" id="trips-show-less">Ver solo hoy</button></p>'
+      : '<p class="muted">Mostrando los últimos 100 viajes' + (tripsFilter.date ? ' del ' + esc(tripsFilter.date) : '') + '. <button type="button" id="trips-show-all">Ver todos</button></p>';
     contentEl.innerHTML = '<h2>' + title + '</h2>' + filterHtml + limitRow + (rows || '<p class="muted">Todavía no hay viajes.</p>');
     var filterForm = document.getElementById('trips-filter');
     if (filterForm) {
@@ -637,15 +695,15 @@
       filterForm.addEventListener('submit', function (ev) { ev.preventDefault(); });
       var clearBtn = document.getElementById('trips-filter-clear');
       if (clearBtn) clearBtn.addEventListener('click', function () {
-        tripsFilter.date = ''; tripsFilter.taxi_id = ''; tripsFilter.driver_id = '';
+        tripsFilter.date = todayLocal(); tripsFilter.taxi_id = ''; tripsFilter.driver_id = '';
         tripsShowAll = false;
         renderTrips();
       });
     }
     var showAllBtn = document.getElementById('trips-show-all');
-    if (showAllBtn) showAllBtn.addEventListener('click', function () { tripsShowAll = true; renderTrips(); });
+    if (showAllBtn) showAllBtn.addEventListener('click', function () { tripsShowAll = true; tripsFilter.date = ''; renderTrips(); });
     var showLessBtn = document.getElementById('trips-show-less');
-    if (showLessBtn) showLessBtn.addEventListener('click', function () { tripsShowAll = false; renderTrips(); });
+    if (showLessBtn) showLessBtn.addEventListener('click', function () { tripsShowAll = false; tripsFilter.date = todayLocal(); renderTrips(); });
     contentEl.querySelectorAll('[data-edit-trip]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var t = trips.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-trip'); });
@@ -665,7 +723,7 @@
           '<label>Fecha <input name="trip_date" type="date" value="' + esc(t.trip_date) + '" required></label>' +
           '<label>Turno <select name="shift_type"><option value="day"' + (t.shift_type === 'night' ? '' : ' selected') + '>Día</option><option value="night"' + (t.shift_type === 'night' ? ' selected' : '') + '>Noche</option></select></label>' +
           '<label>Método de pago <select name="payment_method_id">' + methodOptions + '</select></label>' +
-          '<label>Monto (USD) <input name="amount" type="number" step="0.01" min="0" value="' + esc(t.amount) + '" required></label>' +
+          '<label>Monto ($) <input name="amount" type="number" step="0.01" min="0" value="' + esc(t.amount) + '" required></label>' +
           '<button type="submit">Guardar cambios</button> <button type="button" data-cancel-edit>Cancelar</button></form>';
         var f = card.querySelector('form');
         f.addEventListener('submit', async function (ev) {
@@ -714,7 +772,7 @@
       '<label>Fecha <input name="trip_date" type="date" value="' + todayLocal() + '" required></label>' +
       '<label>Turno <select name="shift_type"><option value="day"' + (nightDefault ? '' : ' selected') + '>Día</option><option value="night"' + (nightDefault ? ' selected' : '') + '>Noche</option></select></label>' +
       '<label>Método de pago <select name="payment_method_id" required>' + methodOptions + '</select></label>' +
-      '<label>Monto del viaje (USD) <input name="amount" type="number" step="0.01" min="0" required></label>' +
+      '<label>Monto del viaje ($) <input name="amount" type="number" step="0.01" min="0" required></label>' +
       '<button type="submit">Guardar viaje</button></form>' +
       '<p class="muted" id="trip-geo-status">Detectando ubicación…</p>' +
       '<p class="muted">Solo el monto: la hora y el kilometraje van en "Mi día". El % que se aplica es el de tu turno (día o noche), puesto por el administrador.' + pctNote + ' Si cambia después, tus viajes viejos no cambian.</p>';
@@ -816,7 +874,7 @@
       formHtml = '<h3>Nuevo gasto</h3><form id="expense-form">' +
         '<label>Fecha <input name="expense_date" type="date" value="' + todayLocal() + '" required></label>' +
         '<label>Tipo <select name="type"><option value="gasolina">Gasolina</option><option value="arreglos">Arreglos</option><option value="otros">Otros</option></select></label>' +
-        '<label>Monto (USD) <input name="amount" type="number" step="0.01" min="0" required></label>' +
+        '<label>Monto ($) <input name="amount" type="number" step="0.01" min="0" required></label>' +
         '<label>Nota <input name="note" type="text" placeholder="Ej: nafta de la mañana"></label>' +
         '<label>Foto de la factura <input name="receipt" type="file" accept="image/*"></label>' +
         '<button type="submit">Guardar gasto</button></form>';
@@ -843,8 +901,8 @@
       driverFilterHtml +
       '<button type="button" id="expenses-filter-clear">Limpiar filtros</button></form>';
     var expensesLimitRow = expensesShowAll
-      ? '<p><button type="button" id="expenses-show-less">Ver últimos 100</button></p>'
-      : '<p class="muted">Mostrando los últimos 100 gastos. <button type="button" id="expenses-show-all">Ver todos</button></p>';
+      ? '<p><button type="button" id="expenses-show-less">Ver solo hoy</button></p>'
+      : '<p class="muted">Mostrando los últimos 100 gastos' + (expensesFilter.date ? ' del ' + esc(expensesFilter.date) : '') + '. <button type="button" id="expenses-show-all">Ver todos</button></p>';
     contentEl.innerHTML = '<h2>' + title + '</h2>' + formHtml + filterHtml + expensesLimitRow + '<h3>Lista</h3>' + (rows || '<p class="muted">Todavía no hay gastos.</p>');
     var filterForm = document.getElementById('expenses-filter');
     if (filterForm) {
@@ -857,15 +915,15 @@
       filterForm.addEventListener('submit', function (ev) { ev.preventDefault(); });
       var clearBtn = document.getElementById('expenses-filter-clear');
       if (clearBtn) clearBtn.addEventListener('click', function () {
-        expensesFilter.date = ''; expensesFilter.taxi_id = ''; expensesFilter.driver_id = '';
+        expensesFilter.date = todayLocal(); expensesFilter.taxi_id = ''; expensesFilter.driver_id = '';
         expensesShowAll = false;
         renderExpenses();
       });
     }
     var expShowAllBtn = document.getElementById('expenses-show-all');
-    if (expShowAllBtn) expShowAllBtn.addEventListener('click', function () { expensesShowAll = true; renderExpenses(); });
+    if (expShowAllBtn) expShowAllBtn.addEventListener('click', function () { expensesShowAll = true; expensesFilter.date = ''; renderExpenses(); });
     var expShowLessBtn = document.getElementById('expenses-show-less');
-    if (expShowLessBtn) expShowLessBtn.addEventListener('click', function () { expensesShowAll = false; renderExpenses(); });
+    if (expShowLessBtn) expShowLessBtn.addEventListener('click', function () { expensesShowAll = false; expensesFilter.date = todayLocal(); renderExpenses(); });
     var form = document.getElementById('expense-form');
     if (form) {
       form.addEventListener('submit', async function (ev) {
@@ -933,7 +991,7 @@
       return '<div class="card"><p><strong>#' + (i + 1) + ' ' + esc(c.driver_name) + '</strong>' +
         (i === 0 && total > 0 ? ' · <strong>Mejor del día</strong>' : '') +
         ' · ' + money(total) + ' · ' + esc(c.trips_count) + ' viajes · ' + perKm +
-        ' · Debe entregar: <strong>' + money(c.handover_to_owner) + '</strong>' + note + '</p>' +
+        ' · ' + handoverCashLine(c, 'El dueño le debe') + note + '</p>' +
         '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
     }).join('');
 
@@ -1390,8 +1448,9 @@
         '<p>Total recaudado</p><p class="big-number">' + money(c.total_collected) + '</p>' +
         '<p>Te quedás / Se queda el chofer: <strong>' + money(c.driver_keeps) + '</strong></p>' +
         '<p>Gastos del día: ' + money(c.expenses) + '</p>' +
-        '<p>Debe entregar al dueño: <strong>' + money(c.handover_to_owner) + '</strong></p>' +
-        '<p class="muted">Los gastos se descuentan de la parte del dueño.</p></div>';
+        '<p>' + handoverCashLine(c, 'El dueño te debe') + '</p>' + methodsLine(c) +
+        (c.note ? '<p>Aclaraciones: ' + esc(c.note) + '</p>' : '') +
+        '<p class="muted">Solo el efectivo entra al chofer; tarjeta, Uber y transferencias van a la cuenta del dueño. Los gastos se descuentan de la parte del dueño.</p></div>';
     }).join('');
   }
 
