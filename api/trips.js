@@ -41,6 +41,8 @@ function withSplit(row) {
     exit_time: row.exit_time,
     exit_km: row.exit_km,
     amount: row.amount,
+    tip: row.tip !== null && row.tip !== undefined ? row.tip : 0,
+    destination: row.destination || null,
     pct_snapshot: row.pct_snapshot,
     shift_type: row.shift_type || 'day',
     payment_method_id: row.payment_method_id,
@@ -70,6 +72,22 @@ function geoPair(body) {
   const lat = validLat(body.trip_lat);
   const lng = validLng(body.trip_lng);
   return lat !== null && lng !== null ? { lat, lng } : null;
+}
+
+// Propina opcional: ausente o vacía = 0, nunca obligatoria. Devuelve NaN
+// si viene un valor no numérico, para que el llamador lo rechace con 400.
+// Reusa toNumber de _db, igual que amount.
+function optionalTip(body) {
+  if (body.tip === undefined || body.tip === null || body.tip === '') return 0;
+  return toNumber(body.tip, NaN);
+}
+
+// Destino opcional: ausente = null (se conserva en PUT), vacío o solo
+// espacios = null, y cualquier texto se recorta a 200 caracteres.
+function optionalDestination(body) {
+  if (body.destination === undefined || body.destination === null) return null;
+  const dest = String(body.destination).trim().slice(0, 200);
+  return dest === '' ? null : dest;
 }
 
 const SELECT_SQL = `
@@ -204,12 +222,14 @@ module.exports = async function handler(req, res) {
       return;
     }
     const amount = toNumber(body.amount, NaN);
+    const tip = optionalTip(body);
+    const destination = optionalDestination(body);
     // Turno del viaje: 'day' o 'night'. El % que se aplica es el del turno.
     const shiftType = body.shift_type === 'night' ? 'night' : 'day';
     const pct = shiftType === 'night'
       ? (driver.rows[0].commission_night_pct !== null ? driver.rows[0].commission_night_pct : driver.rows[0].commission_pct)
       : (driver.rows[0].commission_day_pct !== null ? driver.rows[0].commission_day_pct : driver.rows[0].commission_pct);
-    if (!body.trip_date || !Number.isFinite(amount) || amount < 0) {
+    if (!body.trip_date || !Number.isFinite(amount) || amount < 0 || !Number.isFinite(tip) || tip < 0) {
       res.status(400).json({ error: 'Datos del viaje inválidos (revisá fecha y monto)' });
       return;
     }
@@ -252,9 +272,9 @@ module.exports = async function handler(req, res) {
       paymentMethodId = pm.rows[0].id;
     }
     const inserted = await pool.query(
-      `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng, payment_method_id)
-       VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null, paymentMethodId]
+      `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng, payment_method_id, tip, destination)
+       VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null, paymentMethodId, tip, destination]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [inserted.rows[0].id]);
     res.status(201).json(withSplit(full.rows[0]));
@@ -285,7 +305,14 @@ module.exports = async function handler(req, res) {
       return;
     }
     const amount = toNumber(body.amount, NaN);
-    if (!body.trip_date || !Number.isFinite(amount) || amount < 0) {
+    // La propina y el destino solo cambian si vienen en el body; si no,
+    // se conservan (mismo patrón que la ubicación y el método de pago).
+    // El fallback a 0 / null cubre viajes viejos leídos sin la migración.
+    const newTip = body.tip === undefined
+      ? (current.rows[0].tip !== null && current.rows[0].tip !== undefined ? current.rows[0].tip : 0)
+      : optionalTip(body);
+    const newDestination = body.destination === undefined ? (current.rows[0].destination || null) : optionalDestination(body);
+    if (!body.trip_date || !Number.isFinite(amount) || amount < 0 || !Number.isFinite(newTip) || newTip < 0) {
       res.status(400).json({ error: 'Datos del viaje inválidos' });
       return;
     }
@@ -325,8 +352,8 @@ module.exports = async function handler(req, res) {
       }
     }
     const updated = await pool.query(
-      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3, shift_type = $4, pct_snapshot = $5, trip_lat = $6, trip_lng = $7, payment_method_id = $8 WHERE id = $9 RETURNING *`,
-      [body.trip_date, amount, taxiId, newShiftType, newPct, newLat, newLng, newMethodId, id]
+      `UPDATE trips SET trip_date = $1, amount = $2, taxi_id = $3, shift_type = $4, pct_snapshot = $5, trip_lat = $6, trip_lng = $7, payment_method_id = $8, tip = $9, destination = $10 WHERE id = $11 RETURNING *`,
+      [body.trip_date, amount, taxiId, newShiftType, newPct, newLat, newLng, newMethodId, newTip, newDestination, id]
     );
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [updated.rows[0].id]);
     res.status(200).json(withSplit(full.rows[0]));

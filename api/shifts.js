@@ -117,6 +117,43 @@ module.exports = async function handler(req, res) {
       }));
       return;
     }
+    // Último cierre de un taxi en un día (?last_closed_taxi=<id>&date=AAAA-MM-DD).
+    // Lo usa el relevo al empezar el día: si otro chofer ya cerró hoy en
+    // ese taxi, el que empieza precarga hora y km de entrada con ese
+    // cierre y ve "Relevo de [nombre]". Devuelve SOLO nombre, hora y km
+    // de cierre: nunca montos, viajes, gastos ni datos de otros días.
+    // Cerrada = con hora y km de cierre (sin ellos no hay nada que
+    // precargar). "Última" = mayor hora de cierre del día (desempate por
+    // id mayor). Para el chofer se excluye su propia jornada: si el
+    // último cierre es suyo, no hay relevo y devuelve null.
+    if (req.query && req.query.last_closed_taxi) {
+      const taxiId = Number(req.query.last_closed_taxi);
+      const date = req.query.date ? String(req.query.date) : '';
+      if (!taxiId || !date) {
+        res.status(400).json({ error: 'Faltan taxi y fecha' });
+        return;
+      }
+      if (user.role === 'driver' && date < driverWindowStart()) {
+        res.status(200).json(null);
+        return;
+      }
+      const params = [user.company_id, taxiId, date];
+      let lastSql = `SELECT u.name AS driver_name, s.exit_time, s.exit_km
+        FROM day_shifts s JOIN users u ON u.id = s.driver_id
+        WHERE s.company_id = $1 AND s.taxi_id = $2 AND s.shift_date = $3 AND s.exit_km IS NOT NULL AND s.exit_time IS NOT NULL`;
+      if (user.role === 'driver') {
+        params.push(user.id);
+        lastSql += ' AND s.driver_id <> $' + params.length;
+      }
+      lastSql += ' ORDER BY s.exit_time DESC, s.id DESC LIMIT 1';
+      const last = await pool.query(lastSql, params);
+      if (!last.rows[0]) {
+        res.status(200).json(null);
+        return;
+      }
+      res.status(200).json({ driver_name: last.rows[0].driver_name, exit_time: last.rows[0].exit_time, exit_km: last.rows[0].exit_km });
+      return;
+    }
     const conditions = [];
     const params = [];
     // Aislamiento por empresa: siempre.

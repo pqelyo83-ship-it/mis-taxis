@@ -21,6 +21,23 @@ function publicDriver(row) {
   };
 }
 
+// Valoración del dueño: entero 1 a 5, o null para quitarla (sin valorar).
+// Devuelve false si el valor es inválido (distinto de null y de 1..5).
+function validRating(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= 5 ? n : false;
+}
+
+// Chofer de la empresa del admin, o null. SELECT explícito (nunca u.*
+// devuelto tal cual): solo se necesitan id y owner_rating, y nunca se
+// exponen pin_hash/pin_salt. Un chofer de otra empresa da null, igual
+// que uno inexistente, para no revelar cuál de los dos casos es.
+async function ownedDriver(pool, driverId, companyId) {
+  const result = await pool.query("SELECT id, owner_rating FROM users WHERE id = $1 AND role = 'driver' AND company_id = $2", [driverId, companyId]);
+  return result.rows[0] || null;
+}
+
 function validPct(v) {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
@@ -33,6 +50,34 @@ module.exports = async function handler(req, res) {
   const id = req.query && req.query.id ? Number(req.query.id) : null;
 
   if (req.method === 'GET') {
+    // Notas y valoración del dueño: GET /api/drivers?notes=<driver_id>.
+    // Solo admin (ya lo exige requireAuth arriba) y solo un chofer de su
+    // empresa. Devuelve { driver_id, owner_rating, notes } con las notas
+    // más recientes primero. Esta es la ÚNICA respuesta que trae notas o
+    // valoración; la lista general de abajo sigue usando publicDriver y
+    // nunca las incluye.
+    if (req.query && req.query.notes !== undefined) {
+      const driverId = Number(req.query.notes);
+      if (!driverId) {
+        res.status(400).json({ error: 'Falta el chofer' });
+        return;
+      }
+      const driver = await ownedDriver(pool, driverId, user.company_id);
+      if (!driver) {
+        res.status(403).json({ error: 'Chofer no encontrado o fuera de tu empresa' });
+        return;
+      }
+      const notes = await pool.query(
+        'SELECT id, driver_id, note, created_at FROM driver_notes WHERE company_id = $1 AND driver_id = $2 ORDER BY created_at DESC, id DESC',
+        [user.company_id, driverId]
+      );
+      res.status(200).json({
+        driver_id: driverId,
+        owner_rating: driver.owner_rating !== null && driver.owner_rating !== undefined ? driver.owner_rating : null,
+        notes: notes.rows,
+      });
+      return;
+    }
     const result = await pool.query(
       `SELECT u.*, t.identifier AS taxi_identifier FROM users u
        LEFT JOIN taxis t ON t.id = u.taxi_id
@@ -44,6 +89,87 @@ module.exports = async function handler(req, res) {
   }
 
   const body = readBody(req);
+
+  // Notas del dueño: POST /api/drivers?notes=<driver_id> { note }.
+  if (req.method === 'POST' && req.query && req.query.notes !== undefined) {
+    const driverId = Number(req.query.notes);
+    if (!driverId) {
+      res.status(400).json({ error: 'Falta el chofer' });
+      return;
+    }
+    const driver = await ownedDriver(pool, driverId, user.company_id);
+    if (!driver) {
+      res.status(403).json({ error: 'Chofer no encontrado o fuera de tu empresa' });
+      return;
+    }
+    const note = String(body.note || '').trim();
+    if (!note) {
+      res.status(400).json({ error: 'La nota no puede estar vacía' });
+      return;
+    }
+    if (note.length > 2000) {
+      res.status(400).json({ error: 'La nota es demasiado larga (máximo 2000 caracteres)' });
+      return;
+    }
+    const created = await pool.query(
+      'INSERT INTO driver_notes (company_id, driver_id, note) VALUES ($1, $2, $3) RETURNING id, driver_id, note, created_at',
+      [user.company_id, driverId, note]
+    );
+    res.status(201).json(created.rows[0]);
+    return;
+  }
+
+  // Valoración del dueño: PUT /api/drivers?rating=<driver_id> { owner_rating }.
+  // owner_rating null (o vacío) quita la valoración; 1 a 5 la fija.
+  if (req.method === 'PUT' && req.query && req.query.rating !== undefined) {
+    const driverId = Number(req.query.rating);
+    if (!driverId) {
+      res.status(400).json({ error: 'Falta el chofer' });
+      return;
+    }
+    const driver = await ownedDriver(pool, driverId, user.company_id);
+    if (!driver) {
+      res.status(403).json({ error: 'Chofer no encontrado o fuera de tu empresa' });
+      return;
+    }
+    const rating = validRating(body.owner_rating);
+    if (rating === false) {
+      res.status(400).json({ error: 'La valoración debe ser un número entero de 1 a 5 (o vacía para quitarla)' });
+      return;
+    }
+    const updated = await pool.query(
+      "UPDATE users SET owner_rating = $1 WHERE id = $2 AND role = 'driver' AND company_id = $3 RETURNING id, owner_rating",
+      [rating, driverId, user.company_id]
+    );
+    res.status(200).json({ driver_id: updated.rows[0].id, owner_rating: updated.rows[0].owner_rating });
+    return;
+  }
+
+  // Borrar una nota del dueño: DELETE /api/drivers?notes=<driver_id>&note_id=<id>.
+  // La nota debe pertenecer a ese chofer y a la empresa del admin.
+  if (req.method === 'DELETE' && req.query && req.query.notes !== undefined) {
+    const driverId = Number(req.query.notes);
+    const noteId = Number(req.query.note_id);
+    if (!driverId || !noteId) {
+      res.status(400).json({ error: 'Faltan chofer y nota' });
+      return;
+    }
+    const driver = await ownedDriver(pool, driverId, user.company_id);
+    if (!driver) {
+      res.status(403).json({ error: 'Chofer no encontrado o fuera de tu empresa' });
+      return;
+    }
+    const deleted = await pool.query(
+      'DELETE FROM driver_notes WHERE id = $1 AND driver_id = $2 AND company_id = $3 RETURNING id',
+      [noteId, driverId, user.company_id]
+    );
+    if (!deleted.rows[0]) {
+      res.status(403).json({ error: 'Nota no encontrada o fuera de tu empresa' });
+      return;
+    }
+    res.status(200).json({ ok: true });
+    return;
+  }
 
   if (req.method === 'POST') {
     const name = String(body.name || '').trim();

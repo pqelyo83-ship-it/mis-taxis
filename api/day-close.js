@@ -181,6 +181,21 @@ module.exports = async function handler(req, res) {
       'SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE driver_id = $1 AND expense_date = $2',
       [driver.id, date]
     );
+    // Propinas del día: una suma aparte, solo para informar. Nunca se
+    // mezcla con total, keeps, efectivo, gastos ni saldo a favor (esas
+    // consultas quedan intactas). Si la migración v10 todavía no se
+    // aplicó (error 42703, mismo patrón que el fallback de settlement),
+    // el día informa 0 en vez de romper el cierre.
+    let tipTotal = 0;
+    try {
+      const tips = await pool.query(
+        'SELECT COALESCE(SUM(tip), 0) AS total FROM trips WHERE driver_id = $1 AND trip_date = $2',
+        [driver.id, date]
+      );
+      tipTotal = round2(tips.rows[0].total);
+    } catch (e) {
+      if (e && e.code !== '42703') throw e;
+    }
     // Desglose por método de pago del día (el nombre del método es el que
     // puso el admin; 'efectivo' se reconoce sin importar mayúsculas ni
     // espacios. Los viajes sin método quedan en el grupo NULL).
@@ -265,6 +280,7 @@ module.exports = async function handler(req, res) {
       date: date,
       trips_count: Number(trips.rows[0].trips),
       total_collected: total,
+      tip_total: tipTotal,
       driver_keeps: keeps,
       expenses: expenseTotal,
       owner_share_gross: round2(total - keeps),
