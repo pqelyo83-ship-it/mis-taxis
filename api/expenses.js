@@ -1,6 +1,10 @@
 // /api/expenses — gastos del chofer (gasolina, arreglos, otros).
 // Los gastos se descuentan de la parte del dueño, no de la del chofer.
 // GET: admin ve todos; chofer ve solo los suyos.
+// Visibilidad del chofer: solo los últimos 30 días (hoy y 29 días para
+// atrás, en fecha del servidor), igual que en trips.js. Se aplica siempre
+// a las lecturas del chofer, incluida la foto de la factura. El admin no
+// tiene límite. Esto solo limita lo que se ve; no toca montos ni fechas.
 // POST: chofer crea solo gastos propios; admin puede crear para cualquier chofer.
 // DELETE: el dueño del gasto o el admin.
 
@@ -9,6 +13,12 @@ const { getPool, requireAuth, readBody, toNumber, methodNotAllowed } = require('
 function dateStr(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
+}
+
+// Primer día visible para el chofer: hoy menos 29 días (ventana de 30
+// días corridos, en fecha del servidor en UTC). El admin no tiene límite.
+function driverWindowStart() {
+  return new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 function publicExpense(row) {
@@ -42,7 +52,7 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Falta id' });
       return;
     }
-    const found = await pool.query('SELECT driver_id, company_id, receipt_image FROM expenses WHERE id = $1', [receiptId]);
+    const found = await pool.query('SELECT driver_id, company_id, expense_date, receipt_image FROM expenses WHERE id = $1', [receiptId]);
     const row = found.rows[0];
     if (!row) {
       res.status(404).json({ error: 'Gasto no encontrado' });
@@ -53,6 +63,13 @@ module.exports = async function handler(req, res) {
       return;
     }
     if (user.role === 'driver' && row.driver_id !== user.id) {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    // La foto de un gasto más viejo que 30 días no se muestra al chofer
+    // (la lista ya no la incluye; esto es el resguardo para llamadas
+    // directas por id). El admin no tiene límite.
+    if (user.role === 'driver' && dateStr(row.expense_date) < driverWindowStart()) {
       res.status(403).json({ error: 'Sin permiso' });
       return;
     }
@@ -75,6 +92,12 @@ module.exports = async function handler(req, res) {
     } else if (req.query && req.query.driver_id) {
       params.push(Number(req.query.driver_id));
       conditions.push('e.driver_id = $' + params.length);
+    }
+    // Límite de visibilidad del chofer (ver encabezado): siempre se acota
+    // a los últimos 30 días, venga el pedido como venga.
+    if (user.role === 'driver') {
+      params.push(driverWindowStart());
+      conditions.push('e.expense_date >= $' + params.length);
     }
     if (req.query && req.query.date) {
       params.push(String(req.query.date));

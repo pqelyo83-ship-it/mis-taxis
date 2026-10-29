@@ -4,12 +4,23 @@
 // GET: chofer ve sus jornadas; admin ve todas (?driver_id=, ?date=).
 // POST: crea o actualiza la jornada (un registro por chofer y día).
 // El chofer solo maneja sus propias jornadas; el admin puede cargar la de cualquier chofer.
+// Visibilidad del chofer en lecturas: solo los últimos 30 días (hoy y 29
+// días para atrás, en fecha del servidor), igual que en trips.js. Una
+// fecha más vieja no devuelve nada; sin fecha, la lista queda acotada a
+// la ventana. El admin no tiene límite. Solo limita lo que se ve: no
+// toca la creación ni la edición de jornadas.
 
 const { getPool, requireAuth, readBody, toNumber, round2, methodNotAllowed } = require('./_db');
 
 function dateStr(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
+}
+
+// Primer día visible para el chofer: hoy menos 29 días (ventana de 30
+// días corridos, en fecha del servidor en UTC). El admin no tiene límite.
+function driverWindowStart() {
+  return new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 function withKm(row) {
@@ -83,6 +94,13 @@ module.exports = async function handler(req, res) {
         res.status(400).json({ error: 'Faltan taxi y fecha' });
         return;
       }
+      // Límite de visibilidad del chofer (ver encabezado): el aviso de
+      // taxi ocupado solo opera sobre el día que se está empezando,
+      // siempre dentro de la ventana; una fecha más vieja no devuelve nada.
+      if (user.role === 'driver' && date < driverWindowStart()) {
+        res.status(200).json([]);
+        return;
+      }
       const params = [user.company_id, taxiId, date];
       let openSql = `SELECT s.driver_id, u.name AS driver_name, s.taxi_id, t.identifier AS taxi_identifier, s.shift_date
         FROM day_shifts s JOIN users u ON u.id = s.driver_id
@@ -114,6 +132,17 @@ module.exports = async function handler(req, res) {
     if (req.query && req.query.date) {
       params.push(String(req.query.date));
       conditions.push('s.shift_date = $' + params.length);
+    }
+    // Límite de visibilidad del chofer (ver encabezado): una fecha más
+    // vieja que 30 días no devuelve nada; sin fecha, la lista queda
+    // acotada a la ventana.
+    if (user.role === 'driver') {
+      if (req.query && req.query.date && String(req.query.date) < driverWindowStart()) {
+        res.status(200).json([]);
+        return;
+      }
+      params.push(driverWindowStart());
+      conditions.push('s.shift_date >= $' + params.length);
     }
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
     const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY s.shift_date DESC', params);

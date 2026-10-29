@@ -3,6 +3,12 @@
 // si el admin cambia el % después, los viajes viejos no cambian.
 // Cada viaje responde además con cuánto se queda el chofer y cuánto va al dueño.
 // GET: admin ve todos; chofer ve solo los suyos. Filtros: ?date=AAAA-MM-DD, ?driver_id= (admin).
+// Visibilidad del chofer: solo los últimos 30 días (hoy y 29 días para
+// atrás, en fecha del servidor). Se aplica siempre a las lecturas del
+// chofer — con ?date=, con ?from/?to, con ?limit=all y sin filtros — así
+// ningún camino devuelve días más viejos. El admin no tiene límite.
+// Esto solo limita lo que se ve; no toca montos, porcentajes ni el
+// cálculo del saldo a favor (que vive en day-close y report, no acá).
 // POST: chofer crea solo viajes propios; admin puede crear para cualquier chofer.
 // PUT, DELETE: el dueño del viaje o el admin.
 
@@ -11,6 +17,12 @@ const { getPool, requireAuth, readBody, toNumber, round2, methodNotAllowed } = r
 function dateStr(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
+}
+
+// Primer día visible para el chofer: hoy menos 29 días (ventana de 30
+// días corridos, en fecha del servidor en UTC). El admin no tiene límite.
+function driverWindowStart() {
+  return new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 function withSplit(row) {
@@ -150,6 +162,12 @@ module.exports = async function handler(req, res) {
     } else if (req.query && req.query.driver_id) {
       params.push(Number(req.query.driver_id));
       conditions.push('tr.driver_id = $' + params.length);
+    }
+    // Límite de visibilidad del chofer (ver encabezado): siempre se acota
+    // a los últimos 30 días, venga el pedido como venga.
+    if (user.role === 'driver') {
+      params.push(driverWindowStart());
+      conditions.push('tr.trip_date >= $' + params.length);
     }
     if (req.query && req.query.date) {
       params.push(String(req.query.date));

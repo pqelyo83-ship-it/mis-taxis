@@ -27,6 +27,10 @@
   var expensesFilter = { date: todayLocal(), taxi_id: '', driver_id: '' };
   var tripsShowAll = false;
   var expensesShowAll = false;
+  // Rangos rápidos del chofer en Mis viajes/Gastos: null (vista por día)
+  // o 7 / 14 / 30 días corridos. El admin no usa rangos (tiene Ver todos).
+  var tripsRange = null;
+  var expensesRange = null;
   var perfDays = 30;
   var inicioDate = '';
 
@@ -170,6 +174,22 @@
     var m = String(d.getMonth() + 1).padStart(2, '0');
     var day = String(d.getDate()).padStart(2, '0');
     return d.getFullYear() + '-' + m + '-' + day;
+  }
+
+  // Límite de visibilidad del chofer: solo los últimos 30 días (hoy y 29
+  // días para atrás, en fecha local del teléfono). El admin no tiene
+  // límite. Se usa en los selectores de fecha del chofer y en los rangos
+  // rápidos de Mis viajes/Gastos. Si un chofer pide algo más viejo, se
+  // ajusta a este día (no se le muestra un error).
+  function driverWindowStart() {
+    return daysAgoLocal(29);
+  }
+  function clampDriverDate(value) {
+    if (user && user.role === 'driver' && value && value < driverWindowStart()) return driverWindowStart();
+    return value;
+  }
+  function driverRangeLabel(range) {
+    return range === 7 ? 'la última semana' : (range === 14 ? 'las últimas 2 semanas' : 'el último mes');
   }
 
   function nowTimeLocal() {
@@ -486,7 +506,7 @@
   // cierre: el chofer nunca ve los números de otro.)
 
   async function renderInicio() {
-    var effDate = inicioDate || todayLocal();
+    var effDate = clampDriverDate(inicioDate) || todayLocal();
     var closes = [];
     try { closes = await api('/api/day-close?date=' + encodeURIComponent(effDate)); } catch (e) { closes = []; }
     var mine = closes.length ? closes[0] : null;
@@ -537,7 +557,8 @@
       }
     } catch (e) { /* sin gráfico */ }
     contentEl.innerHTML = '<h2>Inicio</h2>' +
-      '<form id="inicio-date-form" class="row"><label>Ver día <input name="date" type="date" value="' + esc(effDate) + '"></label><button type="submit">Ver</button></form>' +
+      '<form id="inicio-date-form" class="row"><label>Ver día <input name="date" type="date" value="' + esc(effDate) + '"' + (user.role === 'driver' ? ' min="' + driverWindowStart() + '"' : '') + '></label><button type="submit">Ver</button></form>' +
+      (user.role === 'driver' ? '<p class="muted">Podés ver hasta 30 días para atrás.</p>' : '') +
       dayCard + chartHtml +
       '<p><button type="button" id="switch-driver-btn">Cambiar de chofer</button></p>' +
       '<p class="muted">Si otro chofer agarra este teléfono, cambiá de usuario en un toque: volvés al ingreso de la empresa y elegís tu nombre + PIN.</p>' +
@@ -550,7 +571,7 @@
     var dateForm = document.getElementById('inicio-date-form');
     if (dateForm) dateForm.addEventListener('submit', function (ev) {
       ev.preventDefault();
-      inicioDate = dateForm.date.value || '';
+      inicioDate = clampDriverDate(dateForm.date.value) || '';
       renderInicio();
     });
     var switchBtn = document.getElementById('switch-driver-btn');
@@ -686,7 +707,8 @@
     var taxis = [];
     try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
     contentEl.innerHTML = '<h2>Mi día</h2>' +
-      '<label>Fecha <input id="day-date" type="date" value="' + todayLocal() + '"></label>' +
+      '<label>Fecha <input id="day-date" type="date" value="' + todayLocal() + '"' + (user.role === 'driver' ? ' min="' + driverWindowStart() + '"' : '') + '></label>' +
+      (user.role === 'driver' ? '<p class="muted">Podés ver hasta 30 días para atrás.</p>' : '') +
       '<div id="day-state"></div>';
     var dateInput = document.getElementById('day-date');
     var stateEl = document.getElementById('day-state');
@@ -698,7 +720,11 @@
     }
 
     async function load() {
-      var date = dateInput.value;
+      // El chofer solo ve 30 días para atrás: una fecha más vieja se
+      // ajusta al primer día visible (el backend, además, no devuelve
+      // nada para fechas fuera de la ventana).
+      var date = clampDriverDate(dateInput.value);
+      if (date !== dateInput.value) dateInput.value = date;
       try {
         var shifts = await api('/api/shifts?date=' + encodeURIComponent(date));
         var s = shifts && shifts[0] ? shifts[0] : null;
@@ -835,10 +861,17 @@
 
   async function renderTrips() {
     var tripsQuery = [];
-    if (tripsFilter.date) tripsQuery.push('date=' + encodeURIComponent(tripsFilter.date));
+    // Rango rápido del chofer (7/14/30 días): manda sobre el filtro de día.
+    if (user.role === 'driver' && tripsRange) {
+      tripsQuery.push('from=' + encodeURIComponent(daysAgoLocal(tripsRange - 1)));
+      tripsQuery.push('to=' + encodeURIComponent(todayLocal()));
+    } else if (tripsFilter.date) {
+      tripsQuery.push('date=' + encodeURIComponent(tripsFilter.date));
+    }
     if (tripsFilter.taxi_id) tripsQuery.push('taxi_id=' + encodeURIComponent(tripsFilter.taxi_id));
     if (tripsFilter.driver_id) tripsQuery.push('driver_id=' + encodeURIComponent(tripsFilter.driver_id));
-    if (tripsShowAll) tripsQuery.push('limit=all');
+    // "Ver todos" ilimitado es solo del admin: el chofer tiene rangos.
+    if (tripsShowAll && user.role === 'admin') tripsQuery.push('limit=all');
     var trips = await api('/api/trips' + (tripsQuery.length ? '?' + tripsQuery.join('&') : ''));
     var methods = [];
     try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
@@ -869,18 +902,38 @@
       }).join('') + '</select></label>';
     }
     var filterHtml = '<form id="trips-filter" class="row">' +
-      '<label>Día <input name="date" type="date" value="' + esc(tripsFilter.date) + '"></label>' +
+      '<label>Día <input name="date" type="date" value="' + esc(tripsFilter.date) + '"' + (user.role === 'driver' ? ' min="' + driverWindowStart() + '"' : '') + '></label>' +
       '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
       driverFilterHtml +
       '<button type="button" id="trips-filter-clear">Limpiar filtros</button></form>';
-    var limitRow = tripsShowAll
-      ? '<p><button type="button" id="trips-show-less">Ver solo hoy</button></p>'
-      : '<p class="muted">Mostrando los últimos 100 viajes' + (tripsFilter.date ? ' del ' + esc(tripsFilter.date) : '') + '. <button type="button" id="trips-show-all">Ver todos</button></p>';
+    var limitRow;
+    if (user.role === 'driver') {
+      // El chofer no tiene "Ver todos" ilimitado: hoy, o un rango rápido
+      // (última semana / últimas 2 semanas / último mes, tope 30 días).
+      var tripsRangeBtns = [7, 14, 30].map(function (n) {
+        return '<button type="button" class="chip' + (tripsRange === n ? ' active' : '') + '" data-trips-range="' + n + '">' + (n === 7 ? 'Última semana' : (n === 14 ? 'Últimas 2 semanas' : 'Último mes')) + '</button>';
+      }).join(' ');
+      limitRow = '<p class="muted">' + (tripsRange
+        ? 'Mostrando viajes de ' + driverRangeLabel(tripsRange) + '.'
+        : 'Mostrando los últimos 100 viajes' + (tripsFilter.date ? ' del ' + esc(tripsFilter.date) : '') + '.') +
+        '</p><p><button type="button" id="trips-range-clear">Hoy</button> ' + tripsRangeBtns + '</p>' +
+        '<p class="muted">Podés ver hasta 30 días para atrás.</p>';
+    } else {
+      limitRow = tripsShowAll
+        ? '<p><button type="button" id="trips-show-less">Ver solo hoy</button></p>'
+        : '<p class="muted">Mostrando los últimos 100 viajes' + (tripsFilter.date ? ' del ' + esc(tripsFilter.date) : '') + '. <button type="button" id="trips-show-all">Ver todos</button></p>';
+    }
     contentEl.innerHTML = '<h2>' + title + '</h2>' + filterHtml + limitRow + (rows || '<p class="muted">Todavía no hay viajes.</p>');
     var filterForm = document.getElementById('trips-filter');
     if (filterForm) {
       filterForm.addEventListener('change', function () {
-        tripsFilter.date = filterForm.date.value;
+        // Si se elige un día, manda sobre el rango; si solo cambia el
+        // auto, el rango se mantiene. Un día más viejo que 30 días se
+        // ajusta al primer día visible (solo chofer).
+        if (filterForm.date.value) {
+          tripsRange = null;
+          tripsFilter.date = clampDriverDate(filterForm.date.value);
+        }
         tripsFilter.taxi_id = filterForm.taxi_id.value;
         tripsFilter.driver_id = filterForm.driver_id ? filterForm.driver_id.value : '';
         renderTrips();
@@ -890,6 +943,7 @@
       if (clearBtn) clearBtn.addEventListener('click', function () {
         tripsFilter.date = todayLocal(); tripsFilter.taxi_id = ''; tripsFilter.driver_id = '';
         tripsShowAll = false;
+        tripsRange = null;
         renderTrips();
       });
     }
@@ -897,6 +951,21 @@
     if (showAllBtn) showAllBtn.addEventListener('click', function () { tripsShowAll = true; tripsFilter.date = ''; renderTrips(); });
     var showLessBtn = document.getElementById('trips-show-less');
     if (showLessBtn) showLessBtn.addEventListener('click', function () { tripsShowAll = false; tripsFilter.date = todayLocal(); renderTrips(); });
+    contentEl.querySelectorAll('[data-trips-range]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        tripsRange = Number(btn.getAttribute('data-trips-range'));
+        tripsShowAll = false;
+        tripsFilter.date = '';
+        renderTrips();
+      });
+    });
+    var tripsRangeClear = document.getElementById('trips-range-clear');
+    if (tripsRangeClear) tripsRangeClear.addEventListener('click', function () {
+      tripsRange = null;
+      tripsShowAll = false;
+      tripsFilter.date = todayLocal();
+      renderTrips();
+    });
     contentEl.querySelectorAll('[data-edit-trip]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var t = trips.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-trip'); });
@@ -1050,10 +1119,17 @@
 
   async function renderExpenses() {
     var expensesQuery = [];
-    if (expensesFilter.date) expensesQuery.push('date=' + encodeURIComponent(expensesFilter.date));
+    // Rango rápido del chofer (7/14/30 días): manda sobre el filtro de día.
+    if (user.role === 'driver' && expensesRange) {
+      expensesQuery.push('from=' + encodeURIComponent(daysAgoLocal(expensesRange - 1)));
+      expensesQuery.push('to=' + encodeURIComponent(todayLocal()));
+    } else if (expensesFilter.date) {
+      expensesQuery.push('date=' + encodeURIComponent(expensesFilter.date));
+    }
     if (expensesFilter.taxi_id) expensesQuery.push('taxi_id=' + encodeURIComponent(expensesFilter.taxi_id));
     if (expensesFilter.driver_id) expensesQuery.push('driver_id=' + encodeURIComponent(expensesFilter.driver_id));
-    if (expensesShowAll) expensesQuery.push('limit=all');
+    // "Ver todos" ilimitado es solo del admin: el chofer tiene rangos.
+    if (expensesShowAll && user.role === 'admin') expensesQuery.push('limit=all');
     var expenses = await api('/api/expenses' + (expensesQuery.length ? '?' + expensesQuery.join('&') : ''));
     var taxis = [];
     try { taxis = await api('/api/taxis'); } catch (e) { taxis = []; }
@@ -1089,18 +1165,38 @@
       }).join('') + '</select></label>';
     }
     var filterHtml = '<form id="expenses-filter" class="row">' +
-      '<label>Día <input name="date" type="date" value="' + esc(expensesFilter.date) + '"></label>' +
+      '<label>Día <input name="date" type="date" value="' + esc(expensesFilter.date) + '"' + (user.role === 'driver' ? ' min="' + driverWindowStart() + '"' : '') + '></label>' +
       '<label>Auto <select name="taxi_id">' + taxiOptions + '</select></label>' +
       driverFilterHtml +
       '<button type="button" id="expenses-filter-clear">Limpiar filtros</button></form>';
-    var expensesLimitRow = expensesShowAll
-      ? '<p><button type="button" id="expenses-show-less">Ver solo hoy</button></p>'
-      : '<p class="muted">Mostrando los últimos 100 gastos' + (expensesFilter.date ? ' del ' + esc(expensesFilter.date) : '') + '. <button type="button" id="expenses-show-all">Ver todos</button></p>';
+    var expensesLimitRow;
+    if (user.role === 'driver') {
+      // El chofer no tiene "Ver todos" ilimitado: hoy, o un rango rápido
+      // (última semana / últimas 2 semanas / último mes, tope 30 días).
+      var expensesRangeBtns = [7, 14, 30].map(function (n) {
+        return '<button type="button" class="chip' + (expensesRange === n ? ' active' : '') + '" data-expenses-range="' + n + '">' + (n === 7 ? 'Última semana' : (n === 14 ? 'Últimas 2 semanas' : 'Último mes')) + '</button>';
+      }).join(' ');
+      expensesLimitRow = '<p class="muted">' + (expensesRange
+        ? 'Mostrando gastos de ' + driverRangeLabel(expensesRange) + '.'
+        : 'Mostrando los últimos 100 gastos' + (expensesFilter.date ? ' del ' + esc(expensesFilter.date) : '') + '.') +
+        '</p><p><button type="button" id="expenses-range-clear">Hoy</button> ' + expensesRangeBtns + '</p>' +
+        '<p class="muted">Podés ver hasta 30 días para atrás.</p>';
+    } else {
+      expensesLimitRow = expensesShowAll
+        ? '<p><button type="button" id="expenses-show-less">Ver solo hoy</button></p>'
+        : '<p class="muted">Mostrando los últimos 100 gastos' + (expensesFilter.date ? ' del ' + esc(expensesFilter.date) : '') + '. <button type="button" id="expenses-show-all">Ver todos</button></p>';
+    }
     contentEl.innerHTML = '<h2>' + title + '</h2>' + formHtml + filterHtml + expensesLimitRow + '<h3>Lista</h3>' + (rows || '<p class="muted">Todavía no hay gastos.</p>');
     var filterForm = document.getElementById('expenses-filter');
     if (filterForm) {
       filterForm.addEventListener('change', function () {
-        expensesFilter.date = filterForm.date.value;
+        // Si se elige un día, manda sobre el rango; si solo cambia el
+        // auto, el rango se mantiene. Un día más viejo que 30 días se
+        // ajusta al primer día visible (solo chofer).
+        if (filterForm.date.value) {
+          expensesRange = null;
+          expensesFilter.date = clampDriverDate(filterForm.date.value);
+        }
         expensesFilter.taxi_id = filterForm.taxi_id.value;
         expensesFilter.driver_id = filterForm.driver_id ? filterForm.driver_id.value : '';
         renderExpenses();
@@ -1110,6 +1206,7 @@
       if (clearBtn) clearBtn.addEventListener('click', function () {
         expensesFilter.date = todayLocal(); expensesFilter.taxi_id = ''; expensesFilter.driver_id = '';
         expensesShowAll = false;
+        expensesRange = null;
         renderExpenses();
       });
     }
@@ -1117,6 +1214,21 @@
     if (expShowAllBtn) expShowAllBtn.addEventListener('click', function () { expensesShowAll = true; expensesFilter.date = ''; renderExpenses(); });
     var expShowLessBtn = document.getElementById('expenses-show-less');
     if (expShowLessBtn) expShowLessBtn.addEventListener('click', function () { expensesShowAll = false; expensesFilter.date = todayLocal(); renderExpenses(); });
+    contentEl.querySelectorAll('[data-expenses-range]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        expensesRange = Number(btn.getAttribute('data-expenses-range'));
+        expensesShowAll = false;
+        expensesFilter.date = '';
+        renderExpenses();
+      });
+    });
+    var expensesRangeClear = document.getElementById('expenses-range-clear');
+    if (expensesRangeClear) expensesRangeClear.addEventListener('click', function () {
+      expensesRange = null;
+      expensesShowAll = false;
+      expensesFilter.date = todayLocal();
+      renderExpenses();
+    });
     var form = document.getElementById('expense-form');
     if (form) {
       form.addEventListener('submit', async function (ev) {
@@ -1684,11 +1796,17 @@
 
   async function renderMyClose() {
     contentEl.innerHTML = '<h2>Cierre del día</h2><form id="close-form" class="row">' +
-      '<label>Fecha <input name="date" type="date" value="' + todayLocal() + '" required></label>' +
-      '<button type="submit">Ver cierre</button></form><div id="close-result"></div>';
+      '<label>Fecha <input name="date" type="date" value="' + todayLocal() + '" required' + (user.role === 'driver' ? ' min="' + driverWindowStart() + '"' : '') + '></label>' +
+      '<button type="submit">Ver cierre</button></form>' +
+      (user.role === 'driver' ? '<p class="muted">Podés ver hasta 30 días para atrás.</p>' : '') + '<div id="close-result"></div>';
     var form = document.getElementById('close-form');
     var result = document.getElementById('close-result');
     async function load() {
+      // El chofer solo ve 30 días para atrás: una fecha más vieja se
+      // ajusta al primer día visible (el backend, además, no devuelve
+      // nada para fechas fuera de la ventana).
+      var d = clampDriverDate(form.date.value);
+      if (d !== form.date.value) form.date.value = d;
       try {
         var closes = await api('/api/day-close?date=' + encodeURIComponent(form.date.value));
         result.innerHTML = closes.length ? closeCardsHtml(closes) : '<p class="muted">Sin datos para esa fecha.</p>';

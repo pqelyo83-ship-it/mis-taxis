@@ -33,12 +33,24 @@
 // descuento a pendiente. Si la migración v9 todavía no se aplicó, todo se
 // trata como "pendiente" (mismo patrón de fallback 42703 que la nota).
 // El chofer ve solo su propio cierre; el admin ve el de todos.
+// Visibilidad del chofer: solo los últimos 30 días. Si el chofer pide
+// una fecha más vieja, se le devuelve una lista vacía (sin error).
+// El cálculo del saldo a favor NO se limita: usa la secuencia completa
+// de días cerrados, así que un cierre dentro de la ventana muestra su
+// saldo correcto aunque venga de días más viejos. El admin no tiene
+// límite.
 
 const { getPool, requireAuth, round2, methodNotAllowed } = require('./_db');
 
 function dateKey(value) {
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   return String(value).slice(0, 10);
+}
+
+// Primer día visible para el chofer: hoy menos 29 días (ventana de 30
+// días corridos, en fecha del servidor en UTC). El admin no tiene límite.
+function driverWindowStart() {
+  return new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
 // Aplica el saldo a favor sobre días cerrados en orden cronológico.
@@ -94,6 +106,15 @@ module.exports = async function handler(req, res) {
     const today = await pool.query('SELECT CURRENT_DATE AS d');
     date = today.rows[0].d;
     if (date instanceof Date) date = date.toISOString().slice(0, 10);
+  }
+
+  // Límite de visibilidad del chofer (ver encabezado): una fecha más
+  // vieja que 30 días no devuelve nada. Esto va ANTES del cálculo del
+  // saldo a favor y no lo toca: para fechas dentro de la ventana, la
+  // secuencia completa se calcula exactamente igual que antes.
+  if (user.role === 'driver' && date < driverWindowStart()) {
+    res.status(200).json([]);
+    return;
   }
 
   let drivers;
