@@ -32,6 +32,8 @@ function withKm(row) {
     exit_lat: row.exit_lat,
     exit_lng: row.exit_lng,
     note: row.note || null,
+    settlement: row.settlement || 'pendiente',
+    settled_at: row.settled_at || null,
     km_driven: km,
     created_at: row.created_at,
   };
@@ -121,6 +123,67 @@ module.exports = async function handler(req, res) {
 
   if (req.method !== 'POST') return methodNotAllowed(res);
   const body = readBody(req);
+  // Marcar liquidación (solo el dueño): POST /api/shifts con
+  // { action: 'settle', driver_id, shift_date, settlement }. La marca vive
+  // en la jornada (day_shifts.settlement), por eso va en este archivo y no
+  // en uno nuevo (límite de 12 funciones). No crea ni modifica jornadas:
+  // exige una jornada cerrada existente del chofer en la empresa del
+  // dueño. "Recibido" es solo confirmación; "pagado" significa que el
+  // dueño ya pagó esa deuda en mano, así que ese día no genera saldo a
+  // favor en day-close/report (los días siguientes se calculan sin ese
+  // descuento). Volver a "pendiente" desmarca (por ejemplo, si se marcó
+  // por error) y el saldo vuelve a calcularse. Guardar una jornada nunca
+  // toca la marca. Si la migración v9 todavía no se aplicó, se avisa en
+  // vez de fallar con un error críptico.
+  if (body.action === 'settle') {
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    const settlement = String(body.settlement || '');
+    if (['pendiente', 'recibido', 'pagado'].indexOf(settlement) === -1) {
+      res.status(400).json({ error: 'Estado de liquidación inválido' });
+      return;
+    }
+    const settleDriverId = Number(body.driver_id);
+    const settleDate = String(body.shift_date || '');
+    if (!settleDriverId || !/^\d{4}-\d{2}-\d{2}$/.test(settleDate)) {
+      res.status(400).json({ error: 'Faltan chofer y fecha' });
+      return;
+    }
+    const settleDriver = await pool.query("SELECT id, company_id FROM users WHERE id = $1 AND role = 'driver'", [settleDriverId]);
+    if (!settleDriver.rows[0] || settleDriver.rows[0].company_id !== user.company_id) {
+      res.status(400).json({ error: 'Chofer inválido' });
+      return;
+    }
+    const settleShift = await pool.query(
+      'SELECT id, exit_km FROM day_shifts WHERE driver_id = $1 AND shift_date = $2 AND company_id = $3',
+      [settleDriverId, settleDate, user.company_id]
+    );
+    if (!settleShift.rows[0]) {
+      res.status(400).json({ error: 'No hay jornada cargada para ese día' });
+      return;
+    }
+    if (settleShift.rows[0].exit_km === null || settleShift.rows[0].exit_km === undefined) {
+      res.status(400).json({ error: 'La jornada todavía está abierta' });
+      return;
+    }
+    try {
+      await pool.query(
+        "UPDATE day_shifts SET settlement = $1, settled_at = CASE WHEN $1 = 'pendiente' THEN NULL ELSE NOW() END WHERE id = $2",
+        [settlement, settleShift.rows[0].id]
+      );
+    } catch (e) {
+      if (e && e.code === '42703') {
+        res.status(400).json({ error: 'La liquidación todavía no está disponible: falta aplicar la migración v9' });
+        return;
+      }
+      throw e;
+    }
+    const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [settleShift.rows[0].id]);
+    res.status(200).json(withKm(full.rows[0]));
+    return;
+  }
   const driverId = user.role === 'admin' && body.driver_id ? Number(body.driver_id) : user.id;
   const driver = await pool.query("SELECT id, company_id FROM users WHERE id = $1 AND role = 'driver'", [driverId]);
   if (!driver.rows[0] || driver.rows[0].company_id !== user.company_id) {

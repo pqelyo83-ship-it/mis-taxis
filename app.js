@@ -52,17 +52,109 @@
     return '<p class="muted">Por método: ' + parts.join(' · ') + '</p>';
   }
 
-  // Línea de entrega en efectivo de un cierre (day-close). Solo el efectivo
-  // entra al chofer; si la cuenta da negativa, el dueño le debe al chofer.
-  // Si la API todavía no trae handover_cash, se muestra la cuenta vieja.
+  // Línea de entrega en efectivo de un cierre (day-close) o del resumen
+  // del reporte. Solo el efectivo entra al chofer; si la cuenta da
+  // negativa, el dueño le debe al chofer. Cuando la API trae entrega neta
+  // (handover_net), esa es la que se muestra: ya descuenta el saldo a
+  // favor aplicado. Si la API todavía no trae handover_net, se muestra la
+  // cuenta vieja.
   function handoverCashLine(c, ownerOwesLabel) {
-    if (c.handover_cash === null || c.handover_cash === undefined) {
+    var val = (c.handover_net !== null && c.handover_net !== undefined) ? c.handover_net
+      : (c.handover_cash !== null && c.handover_cash !== undefined ? c.handover_cash : null);
+    if (val === null || val === undefined) {
       return 'Debe entregar: <strong>' + money(c.handover_to_owner) + '</strong>';
     }
-    if (Number(c.handover_cash) < 0) {
-      return esc(ownerOwesLabel) + ': <strong>' + money(-Number(c.handover_cash)) + '</strong>';
+    if (Number(val) < 0) {
+      return esc(ownerOwesLabel) + ': <strong>' + money(-Number(val)) + '</strong>';
     }
-    return 'Debe entregar en efectivo: <strong>' + money(c.handover_cash) + '</strong>';
+    var neto = (c.credit_applied !== null && c.credit_applied !== undefined && Number(c.credit_applied) > 0) ? ' (neto)' : '';
+    return 'Debe entregar en efectivo' + neto + ': <strong>' + money(val) + '</strong>';
+  }
+
+  // Líneas del saldo a favor del chofer (day-close). Solo se muestran
+  // cuando hay saldo, para no agregar ruido: no es un gasto, es plata que
+  // el dueño le debe al chofer de liquidaciones anteriores y que se
+  // descuenta de la entrega de este día.
+  function creditLines(c) {
+    if (!c) return '';
+    var before = Number(c.credit_before) || 0;
+    var applied = Number(c.credit_applied) || 0;
+    var after = Number(c.credit_after) || 0;
+    if (before <= 0 && applied <= 0 && after <= 0) return '';
+    var closed = c.shift_exit_km !== null && c.shift_exit_km !== undefined;
+    var html = '';
+    if (before > 0) html += '<p>Saldo a favor anterior: ' + money(before) + '</p>';
+    if (applied > 0) html += '<p>Saldo aplicado: ' + money(applied) + '</p>';
+    if (after > 0 && (closed || after !== before)) html += '<p>Saldo a favor restante: ' + money(after) + '</p>';
+    return html;
+  }
+
+  // Línea de estado de liquidación de un cierre (day-close). Solo para
+  // días cerrados: un día abierto todavía no tiene nada que liquidar.
+  // "Recibido" es confirmación del dueño; "pagado" significa que el dueño
+  // ya pagó ese saldo en mano (ese día no genera saldo a favor). Sin
+  // marca, el cierre queda pendiente.
+  function isClosedClose(c) {
+    return c && c.shift_exit_km !== null && c.shift_exit_km !== undefined;
+  }
+
+  function settlementLine(c) {
+    if (!isClosedClose(c)) return '';
+    var st = c.settlement || 'pendiente';
+    if (st === 'recibido') return '<p>Liquidación: <strong>Recibido</strong></p>';
+    if (st === 'pagado') {
+      var html = '<p>Liquidación: <strong>Pagado</strong>';
+      if (Number(c.settlement_paid) > 0) html += ' · Se canceló el saldo de este día (' + money(c.settlement_paid) + ')';
+      else html += ' · Sin saldo pendiente de este día';
+      return html + '</p>';
+    }
+    var net = (c.handover_net !== null && c.handover_net !== undefined) ? Number(c.handover_net) : null;
+    if (net === 0) return '<p class="muted">Liquidación: sin saldo a liquidar.</p>';
+    return '<p>Liquidación: <strong>Pendiente</strong></p>';
+  }
+
+  // Botones de liquidación (solo el dueño). Se ofrecen según el signo de
+  // la entrega neta: recibido para entregas positivas, pagado para
+  // negativas; en cero no hay nada que liquidar. El chofer ve solo la
+  // línea de estado, sin botones.
+  function settlementButtons(c) {
+    if (!c || user.role !== 'admin' || !isClosedClose(c)) return '';
+    var st = c.settlement || 'pendiente';
+    var net = (c.handover_net !== null && c.handover_net !== undefined) ? Number(c.handover_net) : null;
+    if (net === null || net === 0) return '';
+    var base = ' data-settle-driver="' + c.driver_id + '" data-settle-date="' + esc(c.date) + '"';
+    if (st === 'pendiente') {
+      return net > 0
+        ? '<p><button type="button" data-settle-state="recibido" data-settle-prev="pendiente"' + base + '>Marcar recibido</button></p>'
+        : '<p><button type="button" data-settle-state="pagado" data-settle-prev="pendiente"' + base + '>Marcar pagado</button></p>';
+    }
+    return '<p><button type="button" data-settle-state="pendiente" data-settle-prev="' + esc(st) + '"' + base + '>Quitar marca</button></p>';
+  }
+
+  function wireSettleButtons(reload) {
+    contentEl.querySelectorAll('[data-settle-state]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var state = btn.getAttribute('data-settle-state');
+        var prev = btn.getAttribute('data-settle-prev');
+        if (state === 'pagado' && !confirm('Marcar pagado significa que ya le pagaste este saldo en mano. Los días siguientes se calculan sin este descuento (si ya lo habían descontado, quedan pendientes). ¿Confirmás?')) return;
+        if (state === 'pendiente' && prev === 'pagado' && !confirm('Quitar la marca vuelve a generar el saldo de este día: los días siguientes se recalculan con ese descuento. ¿Confirmás?')) return;
+        try {
+          await api('/api/shifts', 'POST', { action: 'settle', driver_id: btn.getAttribute('data-settle-driver'), shift_date: btn.getAttribute('data-settle-date'), settlement: state });
+          showMessage('Liquidación actualizada.', 'ok');
+          if (reload) reload();
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
+  }
+
+  // Un cierre está pendiente de liquidar cuando está cerrado, tiene saldo
+  // distinto de cero y todavía no se marcó. Los días abiertos y los días
+  // con entrega neta cero no cuentan (no hay nada que liquidar).
+  function isPendingClose(c) {
+    if (!isClosedClose(c)) return false;
+    var net = (c.handover_net !== null && c.handover_net !== undefined) ? Number(c.handover_net) : Number(c.handover_cash) || 0;
+    if (net === 0) return false;
+    return (c.settlement || 'pendiente') === 'pendiente';
   }
 
   function todayLocal() {
@@ -414,7 +506,7 @@
         '<p>Total facturado</p><p class="big-number">' + money(mine.total_collected) + '</p>' +
         '<p>Te quedás: <strong>' + money(mine.driver_keeps) + '</strong></p>' +
         '<p>Gastos: ' + money(mine.expenses) + '</p>' +
-        '<p>' + handoverCashLine(mine, 'El dueño te debe') + '</p>' + methodsLine(mine) + '</div>';
+        '<p>' + handoverCashLine(mine, 'El dueño te debe') + '</p>' + methodsLine(mine) + creditLines(mine) + settlementLine(mine) + '</div>';
     }
     var chartHtml = '';
     try {
@@ -482,6 +574,107 @@
         buildTabs();
       });
     });
+  }
+
+  // ---------- Ficha del chofer (desde el Resumen, solo admin) ----------
+  // Tocás un chofer en el ranking del Resumen y ves todo de ese chofer:
+  // datos, totales del período (el mismo 7/30 días del chip del Resumen),
+  // cierres recientes, viajes y gastos. Solo lectura: no edita ni borra
+  // nada y no toca la matemática (reutiliza handoverCashLine, creditLines
+  // y closeCardsHtml). El chofer nunca llega acá: el Resumen es una
+  // pestaña solo del admin y el rol se vuelve a chequear acá.
+  async function renderDriverDetail(driverId) {
+    if (user.role !== 'admin') return;
+    var drivers = [];
+    try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+    var d = drivers.find(function (x) { return String(x.id) === String(driverId); }) || { name: 'Chofer' };
+    var today = todayLocal();
+    var from = daysAgoLocal(perfDays === 7 ? 6 : 29);
+    var periodLabel = perfDays === 7 ? 'últimos 7 días' : 'últimos 30 días';
+    var headCard = '<div class="card"><p><strong>' + esc(d.name) + '</strong>' +
+      (d.taxi_identifier ? ' · Taxi: ' + esc(d.taxi_identifier) : '') +
+      (d.commission_day_pct !== undefined && d.commission_day_pct !== null ? ' · % día: ' + esc(d.commission_day_pct) : '') +
+      (d.commission_night_pct !== undefined && d.commission_night_pct !== null ? ' · % noche: ' + esc(d.commission_night_pct) : '') +
+      (d.phone ? ' · ' + esc(d.phone) : '') +
+      (d.active !== undefined ? ' · ' + (d.active ? 'Activo' : 'Inactivo') : '') + '</p></div>';
+    contentEl.innerHTML = '<p><button type="button" id="driver-detail-back">← Volver al Resumen</button></p>' +
+      '<h2>Ficha del chofer</h2>' + headCard + '<p class="muted">Cargando…</p>';
+    document.getElementById('driver-detail-back').addEventListener('click', function () { renderResumen(); });
+
+    var rep = null;
+    try { rep = await api('/api/report?driver_id=' + encodeURIComponent(driverId) + '&from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(today)); } catch (e) { rep = null; }
+    var totalsHtml = '<p class="muted">Sin datos del período.</p>';
+    if (rep && rep.totals) {
+      var t = rep.totals;
+      var tClose = { handover_net: t.handover_net, handover_cash: t.handover_cash, credit_applied: t.credit_applied, credit_before: t.opening_credit, credit_after: t.credit_closing, shift_exit_km: 0 };
+      totalsHtml = '<div class="card"><p>Total facturado (' + periodLabel + ')</p><p class="big-number">' + money(t.total) + '</p>' +
+        '<p>' + esc(t.trips_count) + ' viajes · Efectivo: ' + money(t.cash_total) + ' · Se queda: ' + money(t.driver_keeps) + ' · Gastos: ' + money(t.expenses) + '</p>' +
+        '<p>' + handoverCashLine(tClose, 'El dueño le debe') + '</p>' + creditLines(tClose) +
+        (t.unclassified_total > 0 ? '<p class="muted">Sin método (sin clasificar, no entra en el efectivo): ' + money(t.unclassified_total) + '</p>' : '') +
+        (t.km ? '<p class="muted">' + esc(t.km) + ' km' + (t.avg_per_km !== null && t.avg_per_km !== undefined ? ' · ' + money(t.avg_per_km) + '/km' : '') + '</p>' : '') + '</div>';
+    }
+
+    // Cierres recientes: los últimos 7 días, solo los días con actividad
+    // (jornada, viajes o gastos). Cada cierre ya trae su cadena en
+    // efectivo y sus líneas de saldo a favor, así que se reutiliza
+    // closeCardsHtml tal cual se ve en Cierres.
+    var recentCloses = [];
+    try {
+      var dates = [];
+      for (var i = 0; i < 7; i++) dates.push(daysAgoLocal(i));
+      var all = await Promise.all(dates.map(function (dt) { return api('/api/day-close?date=' + encodeURIComponent(dt)).catch(function () { return []; }); }));
+      all.forEach(function (closes) {
+        var mine = closes.find(function (c) { return String(c.driver_id) === String(driverId); });
+        if (mine && (mine.shift_entry_time || Number(mine.trips_count) > 0 || Number(mine.expenses) > 0)) recentCloses.push(mine);
+      });
+    } catch (e) { recentCloses = []; }
+
+    var trips = [];
+    try {
+      trips = await api('/api/trips?driver_id=' + encodeURIComponent(driverId) + '&limit=all');
+      trips.sort(function (a, b) {
+        if (a.trip_date !== b.trip_date) return a.trip_date < b.trip_date ? 1 : -1;
+        return Number(b.id) - Number(a.id);
+      });
+      trips = trips.slice(0, 20);
+    } catch (e) { trips = []; }
+    var tripRows = trips.map(function (tr) {
+      return '<div class="card"><p><strong>' + esc(tr.trip_date) + '</strong>' +
+        (tr.taxi_identifier ? ' · ' + esc(tr.taxi_identifier) : '') + ' · Turno: ' + (tr.shift_type === 'night' ? 'Noche' : 'Día') + '</p>' +
+        '<p>Monto: ' + money(tr.amount) + ' · %: ' + esc(tr.pct_snapshot) + '% · Te quedás: ' + money(tr.driver_keeps) + ' · Dueño: ' + money(tr.owner_share) + (tr.payment_method_name ? ' · Pago: ' + esc(tr.payment_method_name) : '') + '</p></div>';
+    }).join('');
+
+    var expenses = [];
+    try {
+      expenses = await api('/api/expenses?driver_id=' + encodeURIComponent(driverId) + '&limit=all');
+      expenses.sort(function (a, b) {
+        if (a.expense_date !== b.expense_date) return a.expense_date < b.expense_date ? 1 : -1;
+        return Number(b.id) - Number(a.id);
+      });
+      expenses = expenses.slice(0, 20);
+    } catch (e) { expenses = []; }
+    var expRows = expenses.map(function (g) {
+      return '<div class="card"><p><strong>' + esc(g.expense_date) + '</strong> · ' + esc(g.type) + ' · ' + money(g.amount) + '</p>' +
+        (g.note ? '<p>' + esc(g.note) + '</p>' : '') +
+        (g.has_receipt ? '<button type="button" class="small" data-receipt-expense="' + g.id + '">Ver factura</button>' : '') + '</div>';
+    }).join('');
+
+    contentEl.innerHTML = '<p><button type="button" id="driver-detail-back">← Volver al Resumen</button></p>' +
+      '<h2>Ficha del chofer</h2>' + headCard +
+      '<h3>Totales (' + periodLabel + ')</h3>' + totalsHtml +
+      '<h3>Últimos cierres</h3>' + (recentCloses.length ? closeCardsHtml(recentCloses, true) : '<p class="muted">Sin cierres con actividad en los últimos 7 días.</p>') +
+      '<h3>Últimos viajes</h3>' + (tripRows || '<p class="muted">Sin viajes.</p>') +
+      '<h3>Últimos gastos</h3>' + (expRows || '<p class="muted">Sin gastos.</p>');
+    document.getElementById('driver-detail-back').addEventListener('click', function () { renderResumen(); });
+    contentEl.querySelectorAll('[data-receipt-expense]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        try {
+          var data = await api('/api/expenses?receipt=' + btn.getAttribute('data-receipt-expense'));
+          showReceiptImage(data.image);
+        } catch (e) { showMessage(e.message, 'error'); }
+      });
+    });
+    wireSettleButtons(function () { renderDriverDetail(driverId); });
   }
 
   // ---------- Mi día (jornada) ----------
@@ -988,10 +1181,10 @@
       var note = '';
       if (!c.shift_entry_time) note = ' · Sin jornada';
       else if (!c.shift_exit_time) note = ' · Jornada abierta';
-      return '<div class="card"><p><strong>#' + (i + 1) + ' ' + esc(c.driver_name) + '</strong>' +
+      return '<div class="card" data-driver-detail="' + c.driver_id + '" style="cursor:pointer" title="Ver ficha del chofer"><p><strong>#' + (i + 1) + ' ' + esc(c.driver_name) + '</strong>' +
         (i === 0 && total > 0 ? ' · <strong>Mejor del día</strong>' : '') +
         ' · ' + money(total) + ' · ' + esc(c.trips_count) + ' viajes · ' + perKm +
-        ' · ' + handoverCashLine(c, 'El dueño le debe') + note + '</p>' +
+        ' · ' + handoverCashLine(c, 'El dueño le debe') + note + ' · <span class="muted">Ver ficha ›</span></p>' +
         '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
     }).join('');
 
@@ -1018,18 +1211,18 @@
       var rows = drivers.filter(function (d) { return d.active; }).map(function (d) {
         seen[d.id] = true;
         var r = byId[d.id];
-        return { name: d.name, total: r ? Number(r.total) : 0, trips: r ? Number(r.trips) : 0, per_km: r ? r.per_km : null };
+        return { id: d.id, name: d.name, total: r ? Number(r.total) : 0, trips: r ? Number(r.trips) : 0, per_km: r ? r.per_km : null };
       });
       rep.per_driver.forEach(function (r) {
-        if (!seen[r.driver_id]) rows.push({ name: r.driver_name, total: Number(r.total), trips: Number(r.trips), per_km: r.per_km });
+        if (!seen[r.driver_id]) rows.push({ id: r.driver_id, name: r.driver_name, total: Number(r.total), trips: Number(r.trips), per_km: r.per_km });
       });
       rows.sort(function (a, b) { return b.total - a.total; });
       var maxPerf = rows.length ? rows[0].total : 0;
       perfCards = rows.map(function (r, i) {
         var pct = maxPerf > 0 ? Math.round(r.total / maxPerf * 100) : 0;
-        return '<div class="card"><p><strong>#' + (i + 1) + ' ' + esc(r.name) + '</strong>' +
+        return '<div class="card" data-driver-detail="' + r.id + '" style="cursor:pointer" title="Ver ficha del chofer"><p><strong>#' + (i + 1) + ' ' + esc(r.name) + '</strong>' +
           (i === 0 && r.total > 0 ? ' · <strong>Mejor desempeño</strong>' : '') +
-          ' · ' + money(r.total) + ' · ' + esc(r.trips) + ' viajes · ' + (r.per_km !== null && r.per_km !== undefined ? money(r.per_km) + '/km' : '—') + '</p>' +
+          ' · ' + money(r.total) + ' · ' + esc(r.trips) + ' viajes · ' + (r.per_km !== null && r.per_km !== undefined ? money(r.per_km) + '/km' : '—') + ' · <span class="muted">Ver ficha ›</span></p>' +
           '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
       }).join('') || '<p class="muted">Sin choferes.</p>';
     }
@@ -1086,6 +1279,12 @@
       btn.addEventListener('click', function () {
         currentTab = btn.getAttribute('data-goto');
         buildTabs();
+      });
+    });
+    // Click en un chofer del ranking (hoy o desempeño) → su ficha.
+    contentEl.querySelectorAll('[data-driver-detail]').forEach(function (card) {
+      card.addEventListener('click', function () {
+        renderDriverDetail(card.getAttribute('data-driver-detail'));
       });
     });
   }
@@ -1233,18 +1432,19 @@
     function perKmCell(v) {
       return v !== null && v !== undefined ? money(v) + '/km' : '—';
     }
-    function dayRows(rows) {
+    function dayRows(rows, showCredit) {
       if (!rows.length) return '<p class="muted">Sin datos en ese período.</p>';
-      return '<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Viajes</th><th>Recaudado</th><th>Km</th><th>$/km</th></tr></thead><tbody>' +
+      return '<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Viajes</th><th>Recaudado</th><th>Efectivo</th><th>Entrega en efectivo</th>' + (showCredit ? '<th>Saldo anterior</th><th>Aplicado</th><th>Entrega neta</th>' : '') + '<th>Km</th><th>$/km</th></tr></thead><tbody>' +
         rows.map(function (r) {
-          return '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + (r.km !== null ? esc(r.km) + ' km' : '—') + '</td><td>' + perKmCell(r.per_km) + '</td></tr>';
+          return '<tr><td>' + esc(r.date) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + money(r.cash_total) + '</td><td>' + money(r.handover_cash) + '</td>' + (showCredit ? '<td>' + money(r.credit_before) + '</td><td>' + money(r.credit_applied) + '</td><td>' + money(r.handover_net) + '</td>' : '') + '<td>' + (r.km !== null ? esc(r.km) + ' km' : '—') + '</td><td>' + perKmCell(r.per_km) + '</td></tr>';
         }).join('') + '</tbody></table></div>';
     }
-    function breakdownRows(rows, nameFn) {
+    function breakdownRows(rows, nameFn, cashCols, showCredit) {
       if (!rows.length) return '';
-      return '<div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Viajes</th><th>Recaudado</th><th>Km</th><th>$/km</th></tr></thead><tbody>' +
+      var creditCols = cashCols && showCredit;
+      return '<div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Viajes</th><th>Recaudado</th>' + (cashCols ? '<th>Se queda</th><th>Entrega en efectivo</th>' : '') + (creditCols ? '<th>Saldo anterior</th><th>Aplicado</th><th>Entrega neta</th><th>Saldo restante</th>' : '') + '<th>Km</th><th>$/km</th></tr></thead><tbody>' +
         rows.map(function (r) {
-          return '<tr><td>' + esc(nameFn(r)) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + (r.km !== null ? esc(r.km) + ' km' : '—') + '</td><td>' + perKmCell(r.per_km) + '</td></tr>';
+          return '<tr><td>' + esc(nameFn(r)) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td>' + (cashCols ? '<td>' + money(r.driver_keeps) + '</td><td>' + money(r.handover_cash) + '</td>' : '') + (creditCols ? '<td>' + money(r.credit_before) + '</td><td>' + money(r.credit_applied) + '</td><td>' + money(r.handover_net) + '</td><td>' + money(r.credit_after) + '</td>' : '') + '<td>' + (r.km !== null ? esc(r.km) + ' km' : '—') + '</td><td>' + perKmCell(r.per_km) + '</td></tr>';
         }).join('') + '</tbody></table></div>';
     }
 
@@ -1269,30 +1469,41 @@
       lines.push(row('TOTALES DEL PERIODO'));
       lines.push(row('Concepto', 'Monto ($)'));
       lines.push(row('Total recaudado', t.total));
+      lines.push(row('Efectivo (entra al chofer)', t.cash_total));
       lines.push(row('Se quedan los choferes', t.driver_keeps));
       lines.push(row('Parte del dueno (antes de gastos)', t.owner_share_gross));
       lines.push(row('Gastos', t.expenses));
-      lines.push(row('Deben entregar al dueno', t.handover_to_owner));
+      lines.push(row('Deben entregar en efectivo al dueno', t.handover_cash));
+      if (t.opening_credit > 0 || t.credit_applied > 0 || t.credit_closing > 0) {
+        lines.push(row('Saldo a favor al inicio del periodo', t.opening_credit));
+        lines.push(row('Saldo a favor aplicado en el periodo', t.credit_applied));
+        lines.push(row('Entrega neta en el periodo', t.handover_net));
+        lines.push(row('Saldo a favor restante', t.credit_closing));
+      }
+      if (t.unclassified_total > 0) lines.push(row('Sin metodo (sin clasificar, no entra en el efectivo)', t.unclassified_total));
       lines.push(row('Viajes', t.trips_count));
       lines.push(row('Km recorridos (km)', t.km));
       lines.push(row('Dias con jornada cerrada', t.days_with_km));
       lines.push(row('Dinero por km promedio ($/km)', t.avg_per_km !== null ? t.avg_per_km : ''));
       lines.push('');
-      lines.push(row('Como se calcula: Total recaudado - Se quedan los choferes - Gastos = Deben entregar al dueno.'));
+      lines.push(row('Como se calcula: Efectivo - Se quedan los choferes - Gastos = Deben entregar en efectivo al dueno. Solo el efectivo entra al chofer; tarjeta, Uber y transferencias van a la cuenta del dueno.'));
+      lines.push(row('Una entrega en efectivo negativa significa que el dueno les debe esa plata a los choferes. Los viajes sin metodo no entran en el efectivo.'));
+      lines.push(row('El saldo a favor no es un gasto: es plata que el dueno le debe al chofer de liquidaciones anteriores y se descuenta de la entrega de los dias siguientes.'));
+      if (form.taxi_id.value || form.payment_method_id.value) lines.push(row('Con filtro de auto o metodo, las cifras de saldo son de secuencia completa (todas las fechas, autos y metodos) y pueden no coincidir con el efectivo filtrado.'));
       lines.push(row('El $/km se calcula solo sobre dias con jornada cerrada; los dias sin jornada no entran en el promedio.'));
       if (form.taxi_id.value) lines.push(row('Con filtro de auto, los gastos se asignan segun el taxi del dia de cada gasto.'));
       lines.push('');
       lines.push(row('POR DIA'));
-      lines.push(row('Fecha', 'Viajes', 'Recaudado ($)', 'Km (km)', '$/km ($)'));
+      lines.push(row('Fecha', 'Viajes', 'Recaudado ($)', 'Efectivo ($)', 'Entrega en efectivo ($)', 'Saldo anterior ($)', 'Aplicado ($)', 'Entrega neta ($)', 'Km (km)', '$/km ($)'));
       rep.per_day.forEach(function (r) {
-        lines.push(row(r.date, r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''));
+        lines.push(row(r.date, r.trips, r.total, r.cash_total, r.handover_cash, r.credit_before, r.credit_applied, r.handover_net, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''));
       });
       if (!form.driver_id.value) {
         lines.push('');
         lines.push(row('POR CHOFER'));
-        lines.push(row('Chofer', 'Viajes', 'Recaudado ($)', 'Km (km)', '$/km ($)'));
+        lines.push(row('Chofer', 'Viajes', 'Recaudado ($)', 'Se queda ($)', 'Entrega en efectivo ($)', 'Saldo anterior ($)', 'Aplicado ($)', 'Entrega neta ($)', 'Saldo restante ($)', 'Km (km)', '$/km ($)'));
         rep.per_driver.forEach(function (r) {
-          lines.push(row(csvCell(r.driver_name), r.trips, r.total, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''));
+          lines.push(row(csvCell(r.driver_name), r.trips, r.total, r.driver_keeps, r.handover_cash, r.credit_before, r.credit_applied, r.handover_net, r.credit_after, r.km !== null ? r.km : '', r.per_km !== null ? r.per_km : ''));
         });
       }
       if (!form.taxi_id.value) {
@@ -1306,9 +1517,9 @@
       if (rep.per_method && rep.per_method.length) {
         lines.push('');
         lines.push(row('POR METODO DE PAGO'));
-        lines.push(row('Metodo', 'Viajes', 'Recaudado ($)', 'Se quedan los choferes ($)'));
+        lines.push(row('Metodo', 'Viajes', 'Recaudado ($)', 'Se quedan los choferes ($)', 'Entra en efectivo'));
         rep.per_method.forEach(function (r) {
-          lines.push(row(csvCell(r.method_name), r.trips, r.total, r.driver_keeps));
+          lines.push(row(csvCell(r.method_name), r.trips, r.total, r.driver_keeps, r.is_cash ? 'Si' : (r.is_unclassified ? 'No (sin clasificar)' : 'No')));
         });
       }
       lines.push('');
@@ -1339,17 +1550,39 @@
           }).join('') + '</tbody></table>';
       }
       var perDayRows = rep.per_day.map(function (r) {
-        return { cells: [esc(r.date), esc(r.trips), money(r.total), kmCell(r.km), pk(r.per_km)] };
+        return { cells: [esc(r.date), esc(r.trips), money(r.total), money(r.cash_total), money(r.handover_cash), money(r.credit_before), money(r.credit_applied), money(r.handover_net), kmCell(r.km), pk(r.per_km)] };
       });
       var perDriverRows = rep.per_driver.map(function (r) {
-        return { cells: [esc(r.driver_name), esc(r.trips), money(r.total), kmCell(r.km), pk(r.per_km)] };
+        return { cells: [esc(r.driver_name), esc(r.trips), money(r.total), money(r.driver_keeps), money(r.handover_cash), money(r.credit_before), money(r.credit_applied), money(r.handover_net), money(r.credit_after), kmCell(r.km), pk(r.per_km)] };
       });
       var perTaxiRows = rep.per_taxi.map(function (r) {
         return { cells: [esc(r.taxi_identifier), esc(r.trips), money(r.total), kmCell(r.km), pk(r.per_km)] };
       });
       var perMethodRows = (rep.per_method || []).map(function (r) {
-        return { cells: [esc(r.method_name), esc(r.trips), money(r.total), money(r.driver_keeps)] };
+        return { cells: [esc(r.method_name) + (r.is_cash ? ' (efectivo)' : '') + (r.is_unclassified ? ' (sin clasificar, no entra en el efectivo)' : ''), esc(r.trips), money(r.total), money(r.driver_keeps)] };
       });
+      var handoverRow = t.handover_cash < 0
+        ? { cells: ['El dueño debe a los choferes', money(-t.handover_cash)], hl: true }
+        : { cells: ['Deben entregar en efectivo al dueño', money(t.handover_cash)], hl: true };
+      var resumenRows = [
+        { cells: ['Total recaudado', money(t.total)] },
+        { cells: ['Efectivo (entra al chofer)', money(t.cash_total)] },
+        { cells: ['Se quedan los choferes', money(t.driver_keeps)] },
+        { cells: ['Parte del dueño (antes de gastos)', money(t.owner_share_gross)] },
+        { cells: ['Gastos', money(t.expenses)] },
+        handoverRow,
+        { cells: ['Viajes', esc(t.trips_count)] },
+        { cells: ['Km recorridos', esc(t.km) + ' km'] },
+        { cells: ['Días con jornada cerrada', esc(t.days_with_km)] },
+        { cells: ['Dinero por km promedio', pk(t.avg_per_km)] },
+      ];
+      if (t.unclassified_total > 0) resumenRows.push({ cells: ['Sin método (sin clasificar, no entra en el efectivo)', money(t.unclassified_total)] });
+      if (t.opening_credit > 0 || t.credit_applied > 0 || t.credit_closing > 0) {
+        resumenRows.push({ cells: ['Saldo a favor al inicio del período', money(t.opening_credit)] });
+        resumenRows.push({ cells: ['Saldo a favor aplicado en el período', money(t.credit_applied)] });
+        resumenRows.push({ cells: ['Entrega neta en el período (saldo descontado)', money(t.handover_net)], hl: true });
+        resumenRows.push({ cells: ['Saldo a favor restante', money(t.credit_closing)] });
+      }
       var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Reporte ' + esc(rep.from) + ' al ' + esc(rep.to) + '</title><style>' +
         'body{font-family:system-ui,Arial,sans-serif;color:#111;max-width:800px;margin:24px auto;padding:0 16px;}' +
         'h1{font-size:22px;margin:0 0 4px;}h2{font-size:17px;margin:24px 0 8px;border-bottom:2px solid #111;padding-bottom:4px;}' +
@@ -1364,22 +1597,13 @@
         '<h1>' + esc(companyName || 'Mis Taxis') + '</h1>' +
         '<p><strong>Reporte del ' + esc(rep.from) + ' al ' + esc(rep.to) + '</strong><br>' +
         'Chofer: ' + esc(filterLabel(form.driver_id)) + ' · Auto: ' + esc(filterLabel(form.taxi_id)) + ' · Método de pago: ' + esc(filterLabel(form.payment_method_id)) + '</p>' +
-        '<h2>Resumen</h2>' + tableHtml(['Concepto', 'Monto'], [
-          { cells: ['Total recaudado', money(t.total)] },
-          { cells: ['Se quedan los choferes', money(t.driver_keeps)] },
-          { cells: ['Parte del dueño (antes de gastos)', money(t.owner_share_gross)] },
-          { cells: ['Gastos', money(t.expenses)] },
-          { cells: ['Deben entregar al dueño', money(t.handover_to_owner)], hl: true },
-          { cells: ['Viajes', esc(t.trips_count)] },
-          { cells: ['Km recorridos', esc(t.km) + ' km'] },
-          { cells: ['Días con jornada cerrada', esc(t.days_with_km)] },
-          { cells: ['Dinero por km promedio', pk(t.avg_per_km)] },
-        ]) +
-        '<h2>Por día</h2>' + tableHtml(['Fecha', 'Viajes', 'Recaudado', 'Km', '$/km'], perDayRows) +
-        (!form.driver_id.value ? '<h2>Por chofer</h2>' + tableHtml(['Chofer', 'Viajes', 'Recaudado', 'Km', '$/km'], perDriverRows) : '') +
+        '<h2>Resumen</h2>' + tableHtml(['Concepto', 'Monto'], resumenRows) +
+        '<h2>Por día</h2>' + tableHtml(['Fecha', 'Viajes', 'Recaudado', 'Efectivo', 'Entrega en efectivo', 'Saldo anterior', 'Aplicado', 'Entrega neta', 'Km', '$/km'], perDayRows) +
+        (!form.driver_id.value ? '<h2>Por chofer</h2>' + tableHtml(['Chofer', 'Viajes', 'Recaudado', 'Se queda', 'Entrega en efectivo', 'Saldo anterior', 'Aplicado', 'Entrega neta', 'Saldo restante', 'Km', '$/km'], perDriverRows) : '') +
         (!form.taxi_id.value ? '<h2>Por auto</h2>' + tableHtml(['Auto', 'Viajes', 'Recaudado', 'Km', '$/km'], perTaxiRows) : '') +
         (perMethodRows.length ? '<h2>Por método de pago</h2>' + tableHtml(['Método', 'Viajes', 'Recaudado', 'Se quedan los choferes'], perMethodRows) : '') +
-        '<p class="muted">Cómo se calcula: Total recaudado − Se quedan los choferes − Gastos = Deben entregar al dueño.</p>' +
+        '<p class="muted">Cómo se calcula: Efectivo − Se quedan los choferes − Gastos = Deben entregar en efectivo al dueño. Solo el efectivo entra al chofer; tarjeta, Uber y transferencias van a la cuenta del dueño. Una entrega en efectivo negativa significa que el dueño les debe esa plata a los choferes. Los viajes sin método no entran en el efectivo. El saldo a favor no es un gasto: es plata que el dueño le debe al chofer de liquidaciones anteriores y se descuenta de la entrega de los días siguientes.</p>' +
+        ((form.taxi_id.value || form.payment_method_id.value) ? '<p class="muted">Con filtro de auto o método, las cifras de saldo son de secuencia completa (todas las fechas, autos y métodos) y pueden no coincidir con el efectivo filtrado.</p>' : '') +
         '<p class="muted">El $/km se calcula solo sobre días con jornada cerrada; los días sin jornada no entran en el promedio. Las celdas con — son días, choferes o autos sin jornada cerrada en el período.</p>' +
         (form.taxi_id.value ? '<p class="muted">Con filtro de auto, los gastos se asignan según el taxi del día de cada gasto.</p>' : '') +
         '<p class="muted">Reporte generado el ' + esc(todayLocal()) + '.</p>' +
@@ -1399,23 +1623,27 @@
       try {
         var rep = await api('/api/report?' + q);
         var t = rep.totals;
+        var hasCredit = (t.opening_credit > 0 || t.credit_applied > 0 || t.credit_closing > 0);
         var html = '<div class="card"><h3>' + esc(rep.from) + ' al ' + esc(rep.to) + '</h3>' +
           '<p>Total recaudado</p><p class="big-number">' + money(t.total) + '</p>' +
           '<p>Viajes: ' + esc(t.trips_count) + ' · Km recorridos: ' + esc(t.km) + ' km</p>' +
           '<p>Dinero por km (promedio): <strong>' + perKmCell(t.avg_per_km) + '</strong></p>' +
-          '<p>Se quedan los choferes: ' + money(t.driver_keeps) + ' · Gastos: ' + money(t.expenses) + ' · Deben entregar: <strong>' + money(t.handover_to_owner) + '</strong></p>' +
-          '<p class="muted">El $/km se calcula solo sobre días con kilometraje cargado (jornada cerrada). Los días sin jornada no entran en el promedio.' +
+          '<p>Efectivo: ' + money(t.cash_total) + ' · Se quedan los choferes: ' + money(t.driver_keeps) + ' · Gastos: ' + money(t.expenses) + ' · ' + (t.handover_cash < 0 ? 'El dueño debe: <strong>' + money(-t.handover_cash) + '</strong>' : 'Deben entregar en efectivo: <strong>' + money(t.handover_cash) + '</strong>') + '</p>' +
+          (t.unclassified_total > 0 ? '<p class="muted">Sin método (sin clasificar, no entra en el efectivo): ' + money(t.unclassified_total) + '</p>' : '') +
+          (hasCredit ? '<p>Saldo a favor de los choferes al inicio del período: ' + money(t.opening_credit) + ' · Aplicado en el período: ' + money(t.credit_applied) + ' · Entrega neta en el período: ' + money(t.handover_net) + ' · Saldo restante: ' + money(t.credit_closing) + '</p>' : '') +
+          '<p class="muted">El $/km se calcula solo sobre días con kilometraje cargado (jornada cerrada). Los días sin jornada no entran en el promedio. Solo el efectivo entra al chofer; tarjeta, Uber y transferencias van a la cuenta del dueño. Una entrega en efectivo negativa significa que el dueño les debe esa plata a los choferes. El saldo a favor no es un gasto: es plata que el dueño le debe al chofer de liquidaciones anteriores y se descuenta de la entrega de los días siguientes.' +
+          ((form.taxi_id.value || form.payment_method_id.value) ? ' Con filtro de auto o método, las cifras de saldo son de secuencia completa (todas las fechas, autos y métodos) y pueden no coincidir con el efectivo filtrado.' : '') +
           (form.taxi_id.value ? ' Gastos asignados al auto según el taxi del día de cada gasto.' : '') + '</p></div>' +
           '<button type="button" id="report-csv-btn">Descargar CSV</button>' +
           '<button type="button" id="report-zip-btn">Descargar facturas (ZIP)</button>' +
           '<button type="button" id="report-print-btn">Imprimir reporte</button>' +
-          '<h3>Por día</h3>' + dayRows(rep.per_day);
-        if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; });
+          '<h3>Por día</h3>' + dayRows(rep.per_day, hasCredit);
+        if (!form.driver_id.value) html += '<h3>Por chofer</h3>' + breakdownRows(rep.per_driver, function (r) { return r.driver_name; }, true, hasCredit);
         if (!form.taxi_id.value) html += '<h3>Por auto</h3>' + breakdownRows(rep.per_taxi, function (r) { return r.taxi_identifier; });
         if (rep.per_method && rep.per_method.length) {
           html += '<h3>Por método de pago</h3><div class="table-wrap"><table><thead><tr><th>Método</th><th>Viajes</th><th>Recaudado</th><th>Se quedan los choferes</th></tr></thead><tbody>' +
             rep.per_method.map(function (r) {
-              return '<tr><td>' + esc(r.method_name) + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + money(r.driver_keeps) + '</td></tr>';
+              return '<tr><td>' + esc(r.method_name) + (r.is_cash ? ' (efectivo)' : '') + (r.is_unclassified ? ' (sin clasificar, no entra en el efectivo)' : '') + '</td><td>' + esc(r.trips) + '</td><td>' + money(r.total) + '</td><td>' + money(r.driver_keeps) + '</td></tr>';
             }).join('') + '</tbody></table></div>';
         }
         result.innerHTML = html;
@@ -1448,7 +1676,7 @@
         '<p>Total recaudado</p><p class="big-number">' + money(c.total_collected) + '</p>' +
         '<p>Te quedás / Se queda el chofer: <strong>' + money(c.driver_keeps) + '</strong></p>' +
         '<p>Gastos del día: ' + money(c.expenses) + '</p>' +
-        '<p>' + handoverCashLine(c, 'El dueño te debe') + '</p>' + methodsLine(c) +
+        '<p>' + handoverCashLine(c, 'El dueño te debe') + '</p>' + methodsLine(c) + creditLines(c) + settlementLine(c) + settlementButtons(c) +
         (c.note ? '<p>Aclaraciones: ' + esc(c.note) + '</p>' : '') +
         '<p class="muted">Solo el efectivo entra al chofer; tarjeta, Uber y transferencias van a la cuenta del dueño. Los gastos se descuentan de la parte del dueño.</p></div>';
     }).join('');
@@ -1464,6 +1692,7 @@
       try {
         var closes = await api('/api/day-close?date=' + encodeURIComponent(form.date.value));
         result.innerHTML = closes.length ? closeCardsHtml(closes) : '<p class="muted">Sin datos para esa fecha.</p>';
+        wireSettleButtons(load);
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
     }
     form.addEventListener('submit', function (ev) { ev.preventDefault(); load(); });
@@ -1483,7 +1712,8 @@
     }).join('');
     contentEl.innerHTML = '<h2>Cierres del día (todos los choferes)</h2><form id="close-form" class="row">' +
       '<label>Fecha <input name="date" type="date" value="' + todayLocal() + '" required></label>' +
-      '<button type="submit">Ver cierres</button></form><div id="close-result"></div>' +
+      '<button type="submit">Ver cierres</button>' +
+      '<label><input type="checkbox" id="close-pending-only"> Solo pendientes de liquidar</label></form><div id="close-result"></div>' +
       '<h3>Cargar o corregir jornada</h3><form id="shift-form" class="row">' +
       '<label>Chofer <select name="driver_id">' + driverOptions + '</select></label>' +
       '<label>Fecha <input name="shift_date" type="date" value="' + todayLocal() + '" required></label>' +
@@ -1496,15 +1726,25 @@
       '<p class="muted">Si un chofer olvidó empezar o cerrar el día, cargalo acá. Guardar reemplaza la jornada de ese chofer y fecha.</p>';
     var form = document.getElementById('close-form');
     var result = document.getElementById('close-result');
+    var pendingOnlyBox = document.getElementById('close-pending-only');
+    var lastCloses = [];
+    function renderCloses() {
+      var pending = lastCloses.filter(isPendingClose);
+      var shown = pendingOnlyBox.checked ? pending : lastCloses;
+      var alerts = lastCloses.filter(function (c) { return c.km_alert; }).length;
+      var banner = alerts ? '<p class="error">⚠ Alerta de km: ' + alerts + ' jornada(s) abrieron con más de 3 km por encima del último cierre de su taxi.</p>' : '';
+      banner += '<p>Pendientes de liquidar: ' + pending.length + '.</p>';
+      result.innerHTML = banner + (shown.length ? closeCardsHtml(shown, true) : '<p class="muted">Sin datos para esa fecha.</p>');
+      wireSettleButtons(load);
+    }
     async function load() {
       try {
-        var closes = await api('/api/day-close?date=' + encodeURIComponent(form.date.value));
-        var alerts = closes.filter(function (c) { return c.km_alert; }).length;
-        var banner = alerts ? '<p class="error">⚠ Alerta de km: ' + alerts + ' jornada(s) abrieron con más de 3 km por encima del último cierre de su taxi.</p>' : '';
-        result.innerHTML = banner + (closes.length ? closeCardsHtml(closes, true) : '<p class="muted">Sin datos para esa fecha.</p>');
+        lastCloses = await api('/api/day-close?date=' + encodeURIComponent(form.date.value));
+        renderCloses();
       } catch (e) { result.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
     }
     form.addEventListener('submit', function (ev) { ev.preventDefault(); load(); });
+    pendingOnlyBox.addEventListener('change', renderCloses);
     var shiftForm = document.getElementById('shift-form');
     shiftForm.addEventListener('submit', async function (ev) {
       ev.preventDefault();
