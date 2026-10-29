@@ -1392,8 +1392,22 @@
       try {
         var created = await api('/api/trips', 'POST', body);
         showMessage('Viaje guardado. Te quedás ' + money(created.driver_keeps) + ' y al dueño le van ' + money(created.owner_share) + '.', 'ok');
-        currentTab = 'trips';
-        buildTabs();
+        // Quedarse en el formulario para seguir agregando: antes saltaba
+        // a la lista de viajes y había que volver a entrar por cada uno.
+        // Solo se limpian los campos propios de cada viaje (monto,
+        // propina, destino); fecha, turno y método quedan como estaban.
+        // Se enfoca el monto para el próximo viaje y se refresca la
+        // ubicación. Los gastos ya volvían solos a su página.
+        f.amount.value = '';
+        f.tip.value = '';
+        f.destination.value = '';
+        if (f.amount.focus) f.amount.focus();
+        tripGeo = null;
+        captureLocation(function (geo) {
+          tripGeo = geo;
+          var st = document.getElementById('trip-geo-status');
+          if (st) st.textContent = geo ? 'Ubicación del viaje detectada.' : 'Sin ubicación (revisá los permisos del navegador).';
+        });
       } catch (e) { showMessage(e.message, 'error'); }
     });
   }
