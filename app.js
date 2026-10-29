@@ -125,22 +125,14 @@
     return '<p>Liquidación: <strong>Pendiente</strong></p>';
   }
 
-  // Botones de liquidación (solo el dueño). Se ofrecen según el signo de
-  // la entrega neta: recibido para entregas positivas, pagado para
-  // negativas; en cero no hay nada que liquidar. El chofer ve solo la
-  // línea de estado, sin botones.
+  // Botones de liquidación por día: ELIMINADOS (2026-10-29). El dueño
+  // ya no liquida por día ni por viaje: liquida el saldo acumulado de
+  // cada chofer, con un solo botón, en la página Liquidación (que
+  // reutiliza el mismo endpoint settle). Las líneas de estado por día
+  // (settlementLine) siguen visibles como información. El chofer nunca
+  // veía botones.
   function settlementButtons(c) {
-    if (!c || user.role !== 'admin' || !isClosedClose(c)) return '';
-    var st = c.settlement || 'pendiente';
-    var net = (c.handover_net !== null && c.handover_net !== undefined) ? Number(c.handover_net) : null;
-    if (net === null || net === 0) return '';
-    var base = ' data-settle-driver="' + c.driver_id + '" data-settle-date="' + esc(c.date) + '"';
-    if (st === 'pendiente') {
-      return net > 0
-        ? '<p><button type="button" data-settle-state="recibido" data-settle-prev="pendiente"' + base + '>Marcar recibido</button></p>'
-        : '<p><button type="button" data-settle-state="pagado" data-settle-prev="pendiente"' + base + '>Marcar pagado</button></p>';
-    }
-    return '<p><button type="button" data-settle-state="pendiente" data-settle-prev="' + esc(st) + '"' + base + '>Quitar marca</button></p>';
+    return '';
   }
 
   function wireSettleButtons(reload) {
@@ -555,6 +547,7 @@
   function adminTabs() {
     var tabs = [
       { id: 'resumen', label: 'Resumen' },
+      { id: 'liquidacion', label: 'Liquidación' },
       { id: 'report', label: 'Reportes' },
       { id: 'closes', label: 'Cierres' },
       { id: 'taxis', label: 'Taxis' },
@@ -596,6 +589,7 @@
       'closes': renderAllCloses,
       'report': renderReport,
       'resumen': renderResumen,
+      'liquidacion': renderLiquidacion,
       'taxis': renderTaxis,
       'drivers': renderDrivers,
       'company': renderCompany,
@@ -1712,7 +1706,7 @@
         '<p class="balance-direction">' + direction + '</p>' +
         '<p class="muted">' + countText + '</p>' +
         '<div class="balance-bar"><div class="balance-bar-fill" style="width: ' + pct + '%"></div></div>' +
-        '<button type="button" data-settle-balance="' + r.driver_id + '" data-driver-name="' + esc(r.name) + '" data-balance="' + r.balance + '" data-pending="' + r.pendingCount + '">Marcar como saldado</button></div>';
+        '<button type="button" data-goto="liquidacion">Liquidar</button></div>';
     }).join('');
     return '<h3>Balances pendientes</h3><p class="muted">Barras en comparación entre choferes, no una meta.</p>' + cards;
   }
@@ -1744,16 +1738,21 @@
   // net == 0 → 'recibido' (limpia el pendiente; un cierre neto cero puede
   // tener raw distinto de cero y por eso no se puede saltear: si quedara
   // pendiente, su raw seguiría en el balance). Usa el endpoint settle
-  // existente, sin cambios de backend.
-  async function settleBalance(btn) {
+  // existente, sin cambios de backend. reloadFn: qué vista recargar al
+  // terminar (por defecto el Resumen; la página Liquidación pasa
+  // renderLiquidacion). data-verb opcional en el botón: 'Liquidar'
+  // para la página Liquidación.
+  async function settleBalance(btn, reloadFn) {
+    var reload = reloadFn || renderResumen;
+    var verb = btn.getAttribute('data-verb') || 'Marcar como saldado';
     var driverId = Number(btn.getAttribute('data-settle-balance'));
     var name = btn.getAttribute('data-driver-name') || 'Chofer';
     var balance = Number(btn.getAttribute('data-balance')) || 0;
     var pending = Number(btn.getAttribute('data-pending')) || 0;
     var direction = balance > 0
       ? 'El chofer te debe ' + money(balance)
-      : 'Vos le debés ' + money(-balance);
-    if (!confirm('¿Marcar como saldado a ' + name + '?\nBalance: ' + direction + '\nCierres pendientes: ' + pending + '\nSe marcan todos los cierres pendientes: positivos como Recibido, negativos como Pagado; el balance vuelve a 0 y los días futuros arrancan limpios.')) return;
+      : (balance < 0 ? 'Vos le debés ' + money(-balance) : 'Sin saldo pendiente');
+    if (!confirm('¿' + verb + ' a ' + name + '?\nBalance: ' + direction + '\nCierres pendientes: ' + pending + '\nSe marcan todos los cierres pendientes: positivos como Recibido, negativos como Pagado; el balance vuelve a 0 y los días futuros arrancan limpios.')) return;
     btn.disabled = true;
     btn.textContent = 'Saldando…';
     var done = 0;
@@ -1784,13 +1783,77 @@
     if (error) {
       showMessage('Se marcaron ' + done + ' cierres de ' + name + ' y se detuvo por un error: ' + error.message + '. Revisá los cierres antes de reintentar.', 'error');
     } else if (remaining > 0) {
-      showMessage('Se marcaron ' + done + ' cierres de ' + name + ' pero quedan ' + remaining + ' pendientes (tope de 500). Volvé a tocar Marcar como saldado para seguir.', 'error');
+      showMessage('Se marcaron ' + done + ' cierres de ' + name + ' pero quedan ' + remaining + ' pendientes (tope de 500). Volvé a tocar ' + verb + ' para seguir.', 'error');
     } else if (done === 0) {
       showMessage('Ya no quedaban cierres pendientes para ' + name + '.', 'ok');
     } else {
-      showMessage('Balance de ' + name + ' saldado: ' + done + ' cierres marcados. El balance vuelve a 0.', 'ok');
+      showMessage((verb === 'Liquidar' ? 'Saldo de ' + name + ' liquidado: ' : 'Balance de ' + name + ' saldado: ') + done + ' cierres marcados. El balance vuelve a 0.', 'ok');
     }
-    renderResumen();
+    reload();
+  }
+
+  // ---------- Liquidación (solo admin) ----------
+  // Una sola página para liquidar choferes: cada chofer tiene UN saldo
+  // acumulado (los días en que te debe suman, los días en que vos le
+  // debés restan) y se liquida con un solo botón; al liquidar, el saldo
+  // vuelve a 0 y los días futuros arrancan limpios. No se liquida por
+  // día ni por viaje. Reutiliza loadPendingBalances y settleBalance
+  // (mismo cálculo y mismo bucle de marcas), sin cambios de backend.
+  // Si el cálculo de balances falla, no se ofrecen botones de liquidar
+  // (el raw sería desconocido); los cierres pendientes igual se listan.
+  async function renderLiquidacion() {
+    contentEl.innerHTML = '<h2>Liquidación</h2><p class="muted">Cargando…</p>';
+    var drivers = [];
+    try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+    var balanceRows = [];
+    var balancesOk = true;
+    try { balanceRows = await loadPendingBalances(drivers); } catch (e) { balancesOk = false; }
+    var shifts = [];
+    try { shifts = await api('/api/shifts'); } catch (e) { shifts = []; }
+    var balanceById = {};
+    balanceRows.forEach(function (r) { balanceById[r.driver_id] = r; });
+    var pendingCount = {};
+    var lastSettled = {};
+    shifts.forEach(function (s) {
+      if (s.exit_km === null || s.exit_km === undefined) return;
+      if ((s.settlement || 'pendiente') === 'pendiente') {
+        pendingCount[s.driver_id] = (pendingCount[s.driver_id] || 0) + 1;
+      } else if (s.settled_at) {
+        if (!lastSettled[s.driver_id] || s.settled_at > lastSettled[s.driver_id]) lastSettled[s.driver_id] = s.settled_at;
+      }
+    });
+    var seen = {};
+    var list = drivers.map(function (d) { seen[d.id] = true; return { id: d.id, name: d.name, active: d.active !== false }; });
+    balanceRows.forEach(function (r) {
+      if (!seen[r.driver_id]) { seen[r.driver_id] = true; list.push({ id: r.driver_id, name: r.name, active: r.active }); }
+    });
+    if (!list.length) {
+      contentEl.innerHTML = '<h2>Liquidación</h2><p class="muted">Sin choferes.</p>';
+      return;
+    }
+    var cards = list.map(function (d) {
+      var b = balanceById[d.id];
+      var balance = b ? b.balance : 0;
+      var pending = pendingCount[d.id] || 0;
+      var direction = balance > 0 ? 'El chofer te debe ' + money(balance)
+        : (balance < 0 ? 'Vos le debés ' + money(-balance) : 'Sin saldo pendiente');
+      var countText = pending === 0 ? 'Sin cierres pendientes'
+        : (pending === 1 ? '1 cierre pendiente' : pending + ' cierres pendientes');
+      var lastText = lastSettled[d.id] ? '<p class="muted">Última liquidación: ' + esc(String(lastSettled[d.id]).slice(0, 10)) + '</p>' : '';
+      var btn = (pending > 0 && balancesOk)
+        ? '<button type="button" data-settle-balance="' + d.id + '" data-driver-name="' + esc(d.name) + '" data-balance="' + balance + '" data-pending="' + pending + '" data-verb="Liquidar">Liquidar</button>'
+        : '';
+      return '<div class="card"><p><strong>' + esc(d.name) + '</strong>' + (d.active ? '' : ' (inactivo)') + '</p>' +
+        '<p class="big-number">' + money(Math.abs(balance)) + '</p>' +
+        '<p>' + direction + '</p><p class="muted">' + countText + '</p>' + lastText + btn + '</div>';
+    }).join('');
+    contentEl.innerHTML = '<h2>Liquidación</h2>' +
+      '<p class="muted">Cada chofer tiene un solo saldo acumulado: los días en que te debe suman y los días en que vos le debés restan. Cuando liquidás, el saldo vuelve a 0 y los días futuros arrancan limpios. Solo se liquida acá, no por día ni por viaje.</p>' +
+      (balancesOk ? '' : '<p class="error">No se pudieron calcular los balances. Los botones de liquidar están ocultos hasta recargar la página.</p>') +
+      cards;
+    contentEl.querySelectorAll('[data-settle-balance]').forEach(function (btn) {
+      btn.addEventListener('click', function () { settleBalance(btn, renderLiquidacion); });
+    });
   }
 
   // ---------- Resumen (página principal del admin) ----------
@@ -1913,6 +1976,7 @@
       perfCards +
       chartHtml +
       '<h3>Ir a</h3><div class="row">' +
+      '<button type="button" data-goto="liquidacion">Liquidación</button>' +
       '<button type="button" data-goto="closes">Cierres</button>' +
       '<button type="button" data-goto="report">Reportes</button>' +
       '<button type="button" data-goto="drivers">Choferes</button>' +
@@ -1934,10 +1998,6 @@
       card.addEventListener('click', function () {
         renderDriverDetail(card.getAttribute('data-driver-detail'));
       });
-    });
-    // Botón "Marcar como saldado" de cada balance pendiente.
-    contentEl.querySelectorAll('[data-settle-balance]').forEach(function (btn) {
-      btn.addEventListener('click', function () { settleBalance(btn); });
     });
   }
 
