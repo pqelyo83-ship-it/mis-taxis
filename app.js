@@ -234,6 +234,24 @@
     }
   }
 
+  // Validación de km: el cierre no puede quedar por debajo de la apertura
+  // (el backend también lo bloquea con un CHECK, pero esto avisa en
+  // pantalla antes de enviar, sin el error feo posterior). Compara como
+  // números (los km admiten decimales); el igual está permitido. Si el
+  // cierre está vacío o no es número, no se valida acá y se mantiene el
+  // comportamiento actual. Devuelve true si se puede enviar.
+  function kmCierreValido(entryKm, exitKm) {
+    if (exitKm === '' || exitKm === null || exitKm === undefined) return true;
+    var entry = Number(entryKm);
+    var exit = Number(exitKm);
+    if (isNaN(entry) || isNaN(exit)) return true;
+    if (exit < entry) {
+      showMessage('El km de cierre no puede ser menor al km de apertura (' + entry + ' km).', 'error');
+      return false;
+    }
+    return true;
+  }
+
   async function api(path, method, body) {
     var headers = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = 'Bearer ' + token;
@@ -526,7 +544,7 @@
         '<p>Total facturado</p><p class="big-number">' + money(mine.total_collected) + '</p>' +
         '<p>Te quedás: <strong>' + money(mine.driver_keeps) + '</strong></p>' +
         '<p>Gastos: ' + money(mine.expenses) + '</p>' +
-        '<p>' + handoverCashLine(mine, 'El dueño te debe') + '</p>' + methodsLine(mine) + creditLines(mine) + settlementLine(mine) + '</div>';
+        '<p class="money-line">' + handoverCashLine(mine, 'El dueño te debe') + '</p>' + methodsLine(mine) + creditLines(mine) + settlementLine(mine) + '</div>';
     }
     var chartHtml = '';
     try {
@@ -630,7 +648,7 @@
       var tClose = { handover_net: t.handover_net, handover_cash: t.handover_cash, credit_applied: t.credit_applied, credit_before: t.opening_credit, credit_after: t.credit_closing, shift_exit_km: 0 };
       totalsHtml = '<div class="card"><p>Total facturado (' + periodLabel + ')</p><p class="big-number">' + money(t.total) + '</p>' +
         '<p>' + esc(t.trips_count) + ' viajes · Efectivo: ' + money(t.cash_total) + ' · Se queda: ' + money(t.driver_keeps) + ' · Gastos: ' + money(t.expenses) + '</p>' +
-        '<p>' + handoverCashLine(tClose, 'El dueño le debe') + '</p>' + creditLines(tClose) +
+        '<p class="money-line">' + handoverCashLine(tClose, 'El dueño le debe') + '</p>' + creditLines(tClose) +
         (t.unclassified_total > 0 ? '<p class="muted">Sin método (sin clasificar, no entra en el efectivo): ' + money(t.unclassified_total) + '</p>' : '') +
         (t.km ? '<p class="muted">' + esc(t.km) + ' km' + (t.avg_per_km !== null && t.avg_per_km !== undefined ? ' · ' + money(t.avg_per_km) + '/km' : '') + '</p>' : '') + '</div>';
     }
@@ -732,7 +750,7 @@
           // Sin jornada: entrada del día. La hora se precarga con la actual
           // y la ubicación se captura del teléfono (si da permiso).
           var entryGeo = null;
-          stateEl.innerHTML = '<form id="day-start-form" class="row">' + taxiSelect(user.taxi_id) +
+          stateEl.innerHTML = '<div class="steps"><span class="step active">1 · Empezar</span><span class="step">2 · Cerrar</span><span class="step">3 · Listo</span></div>' + '<form id="day-start-form" class="row">' + taxiSelect(user.taxi_id) +
             '<label>Hora de entrada <input name="entry_time" type="time" value="' + nowTimeLocal() + '" required></label>' +
             '<label>Km del auto <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
             '<button type="submit">Empezar día</button></form>' +
@@ -777,7 +795,17 @@
           // Jornada abierta: botón para cerrar el día. Hora actual precargada
           // y ubicación de salida del teléfono (si da permiso).
           var exitGeo = null;
-          stateEl.innerHTML = '<p>Taxi del día: <strong>' + esc(s.taxi_identifier || '—') + '</strong> · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Ver entrada en mapa') + '</p>' +
+          // Acciones rápidas del día (solo chofer): al arrancar el día el
+          // chofer cae acá y tiene que poder cargar viajes y gastos sin
+          // quedarse trabado en el formulario de cierre. Reutilizan la
+          // navegación data-goto existente; "Cerrar día" baja al formulario
+          // de cierre que está justo debajo.
+          var quickActions = user.role === 'driver'
+            ? '<div class="row"><button type="button" data-goto="new-trip">Cargar viaje</button>' +
+              '<button type="button" data-goto="expenses">Cargar gasto</button>' +
+              '<button type="button" id="day-goto-close-btn">Cerrar día</button></div>'
+            : '';
+          stateEl.innerHTML = '<div class="steps"><span class="step done">1 · Empezar</span><span class="step active">2 · Cerrar</span><span class="step">3 · Listo</span></div>' + '<p>Taxi del día: <strong>' + esc(s.taxi_identifier || '—') + '</strong> · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Ver entrada en mapa') + '</p>' + quickActions +
             '<form id="day-close-form" class="row">' +
             '<label>Hora de cierre <input name="exit_time" type="time" value="' + nowTimeLocal() + '" required></label>' +
             '<label>Km con el que queda el auto <input name="exit_km" type="number" step="0.01" min="0" required></label>' +
@@ -792,6 +820,7 @@
           document.getElementById('day-close-form').addEventListener('submit', async function (ev) {
             ev.preventDefault();
             var f = ev.target;
+            if (!kmCierreValido(s.entry_km, f.exit_km.value)) return;
             var body = {
               shift_date: date,
               taxi_id: s.taxi_id,
@@ -808,6 +837,21 @@
               load();
             } catch (e) { showMessage(e.message, 'error'); }
           });
+          stateEl.querySelectorAll('[data-goto]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+              currentTab = btn.getAttribute('data-goto');
+              buildTabs();
+            });
+          });
+          var gotoCloseBtn = document.getElementById('day-goto-close-btn');
+          if (gotoCloseBtn) gotoCloseBtn.addEventListener('click', function () {
+            var form = document.getElementById('day-close-form');
+            if (form) {
+              form.scrollIntoView();
+              var t = form.querySelector('input[name="exit_time"]');
+              if (t) t.focus();
+            }
+          });
         } else {
           // Día cerrado: resumen + cierre.
           var closes = await api('/api/day-close?date=' + encodeURIComponent(date));
@@ -815,7 +859,7 @@
             ? ' · Km recorridos: <strong>' + esc(s.km_driven) + ' km</strong>' : '';
           var exitLine = (s.exit_time ? ' · Cierre: ' + esc(s.exit_time) : '') +
             (s.exit_km !== null ? ' · ' + esc(s.exit_km) + ' km' : '');
-          stateEl.innerHTML = '<p><strong>Día cerrado.</strong> Taxi: ' + esc(s.taxi_identifier || '—') +
+          stateEl.innerHTML = '<div class="steps"><span class="step done">1 · Empezar</span><span class="step done">2 · Cerrar</span><span class="step active">3 · Listo</span></div>' + '<p><strong>Día cerrado.</strong> Taxi: ' + esc(s.taxi_identifier || '—') +
             ' · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Entrada en mapa') + exitLine + mapLink(s.exit_lat, s.exit_lng, 'Salida en mapa') + kmLine + '</p>' +
             (closes.length ? closeCardsHtml(closes) : '') +
             '<button type="button" id="day-edit-btn">Editar día</button>';
@@ -837,6 +881,7 @@
       document.getElementById('day-edit-form').addEventListener('submit', async function (ev) {
         ev.preventDefault();
         var f = ev.target;
+        if (!kmCierreValido(f.entry_km.value, f.exit_km.value)) return;
         try {
           await api('/api/shifts', 'POST', {
             shift_date: dateInput.value,
@@ -1269,6 +1314,187 @@
     });
   }
 
+  // ---------- Balances pendientes (tope del Resumen, solo admin) ----------
+  // Balance por chofer = SUMA DE handover_raw (NO de handover_net) sobre
+  // sus días CERRADOS con settlement='pendiente', toda la historia. Sumar
+  // nets es incorrecto: los nets ya descuentan el saldo a favor aplicado,
+  // así que un día negativo viejo quedaría descontado dos veces. Ejemplo:
+  // día1 raw -500 y día2 raw +300 → balance -200 (el dueño debe 200),
+  // aunque la suma de nets da -500. El raw de un día se replica acá con
+  // la misma fórmula que day-close.js: efectivo (método 'efectivo', sin
+  // importar mayúsculas ni espacios) − keeps (amount × pct_snapshot) −
+  // gastos del día. Se lee de los endpoints existentes, sin tocar el
+  // backend: /api/shifts (jornadas con settlement), /api/trips?limit=all
+  // y /api/expenses?limit=all (el admin no tiene límite de 30 días en
+  // ninguno). Los choferes inactivos también entran (se marcan), porque
+  // ninguno de esos endpoints filtra por activo; day-close sí lo hace,
+  // por eso no se usa para esto.
+
+  // Redondeo a 2 decimales, igual que round2 en api/_db.js.
+  function roundMoney(n) {
+    return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+  }
+
+  function isCashMethod(name) {
+    return String(name || '').trim().toLowerCase() === 'efectivo';
+  }
+
+  // Función de raw por (chofer, fecha) de la última carga de balances.
+  // Los viajes y gastos no cambian durante un saldado (solo cambian las
+  // marcas de liquidación, que se releen en cada iteración), así que la
+  // clausura sigue siendo válida dentro del bucle de saldar.
+  var pendingBalanceRawFor = null;
+
+  // Carga los balances pendientes de todos los choferes. Devuelve filas
+  // [{driver_id, name, active, balance, pendingCount}] ordenadas por
+  // |balance| descendente, solo con balance distinto de cero.
+  async function loadPendingBalances(drivers) {
+    var shifts = await api('/api/shifts');
+    var trips = await api('/api/trips?limit=all');
+    var expenses = await api('/api/expenses?limit=all');
+    var tripAgg = {};
+    trips.forEach(function (t) {
+      var key = t.driver_id + '|' + t.trip_date;
+      var a = tripAgg[key] || (tripAgg[key] = { cash: 0, keeps: 0 });
+      if (isCashMethod(t.payment_method_name)) a.cash += Number(t.amount) || 0;
+      a.keeps += (Number(t.amount) || 0) * (Number(t.pct_snapshot) || 0) / 100;
+    });
+    var expAgg = {};
+    expenses.forEach(function (g) {
+      var key = g.driver_id + '|' + g.expense_date;
+      expAgg[key] = (expAgg[key] || 0) + (Number(g.amount) || 0);
+    });
+    function rawFor(driverId, date) {
+      var key = driverId + '|' + date;
+      var ta = tripAgg[key];
+      var cash = ta ? roundMoney(ta.cash) : 0;
+      var keeps = ta ? roundMoney(ta.keeps) : 0;
+      var exp = expAgg[key] !== undefined ? roundMoney(expAgg[key]) : 0;
+      return roundMoney(cash - keeps - exp);
+    }
+    pendingBalanceRawFor = rawFor;
+    var driverInfo = {};
+    (drivers || []).forEach(function (d) {
+      driverInfo[d.id] = { name: d.name, active: d.active !== false };
+    });
+    var perDriver = {};
+    shifts.forEach(function (s) {
+      if (s.exit_km === null || s.exit_km === undefined) return;
+      var id = s.driver_id;
+      var info = driverInfo[id] || { name: s.driver_name || 'Chofer', active: true };
+      var entry = perDriver[id] || (perDriver[id] = { driver_id: id, name: info.name, active: info.active, balanceExact: 0, pendingCount: 0 });
+      if ((s.settlement || 'pendiente') === 'pendiente') {
+        entry.balanceExact += rawFor(id, s.shift_date);
+        entry.pendingCount += 1;
+      }
+    });
+    var rows = Object.keys(perDriver).map(function (id) {
+      var e = perDriver[id];
+      var balance = roundMoney(e.balanceExact);
+      if (balance === 0) balance = 0;
+      return { driver_id: e.driver_id, name: e.name, active: e.active, balance: balance, pendingCount: e.pendingCount };
+    }).filter(function (r) { return r.balance !== 0; });
+    rows.sort(function (a, b) { return Math.abs(b.balance) - Math.abs(a.balance); });
+    return rows;
+  }
+
+  function balancesSectionHtml(rows) {
+    if (!rows.length) {
+      return '<h3>Balances pendientes</h3><div class="card"><p>Sin balances pendientes — todos saldados.</p></div>';
+    }
+    var maxAbs = 0;
+    rows.forEach(function (r) { maxAbs = Math.max(maxAbs, Math.abs(r.balance)); });
+    var cards = rows.map(function (r) {
+      var direction = r.balance > 0
+        ? 'El chofer te debe ' + money(r.balance)
+        : 'Vos le debés ' + money(-r.balance);
+      var countText = r.pendingCount === 1 ? '1 cierre pendiente' : r.pendingCount + ' cierres pendientes';
+      var pct = maxAbs > 0 ? Math.round(Math.abs(r.balance) / maxAbs * 100) : 0;
+      return '<div class="card balance-card"><p class="balance-name"><strong>' + esc(r.name) + '</strong>' + (r.active ? '' : ' (inactivo)') + '</p>' +
+        '<p class="balance-direction">' + direction + '</p>' +
+        '<p class="muted">' + countText + '</p>' +
+        '<div class="balance-bar"><div class="balance-bar-fill" style="width: ' + pct + '%"></div></div>' +
+        '<button type="button" data-settle-balance="' + r.driver_id + '" data-driver-name="' + esc(r.name) + '" data-balance="' + r.balance + '" data-pending="' + r.pendingCount + '">Marcar como saldado</button></div>';
+    }).join('');
+    return '<h3>Balances pendientes</h3><p class="muted">Barras en comparación entre choferes, no una meta.</p>' + cards;
+  }
+
+  // Nets de una secuencia de días cerrados, con la misma regla que
+  // applyCreditToDays en api/day-close.js: el saldo a favor se descuenta
+  // de los días positivos siguientes; un día "pagado" con raw negativo NO
+  // genera saldo. days: [{date, raw, settlement}] (se ordena por fecha).
+  function creditNets(days) {
+    var nets = {};
+    var credit = 0;
+    days.slice().sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); }).forEach(function (d) {
+      var applied = 0;
+      if (d.raw > 0 && credit > 0) {
+        applied = roundMoney(Math.min(credit, d.raw));
+        credit = roundMoney(credit - applied);
+      } else if (d.raw < 0) {
+        if (d.settlement !== 'pagado') credit = roundMoney(credit - d.raw);
+      }
+      nets[d.date] = roundMoney(d.raw - applied);
+    });
+    return nets;
+  }
+
+  // Saldar TODOS los cierres pendientes de un chofer, de a uno por vez y
+  // en orden cronológico, releyendo las jornadas después de cada marca
+  // (así el net del día siguiente se recalcula con la marca recién
+  // puesta). Signo del momento: net > 0 → 'recibido', net < 0 → 'pagado',
+  // net == 0 → 'recibido' (limpia el pendiente; un cierre neto cero puede
+  // tener raw distinto de cero y por eso no se puede saltear: si quedara
+  // pendiente, su raw seguiría en el balance). Usa el endpoint settle
+  // existente, sin cambios de backend.
+  async function settleBalance(btn) {
+    var driverId = Number(btn.getAttribute('data-settle-balance'));
+    var name = btn.getAttribute('data-driver-name') || 'Chofer';
+    var balance = Number(btn.getAttribute('data-balance')) || 0;
+    var pending = Number(btn.getAttribute('data-pending')) || 0;
+    var direction = balance > 0
+      ? 'El chofer te debe ' + money(balance)
+      : 'Vos le debés ' + money(-balance);
+    if (!confirm('¿Marcar como saldado a ' + name + '?\nBalance: ' + direction + '\nCierres pendientes: ' + pending + '\nSe marcan todos los cierres pendientes: positivos como Recibido, negativos como Pagado; el balance vuelve a 0 y los días futuros arrancan limpios.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Saldando…';
+    var done = 0;
+    var error = null;
+    var remaining = 0;
+    try {
+      for (var i = 0; i < 500; i++) {
+        var shifts = await api('/api/shifts?driver_id=' + encodeURIComponent(driverId));
+        var days = shifts.filter(function (s) { return s.exit_km !== null && s.exit_km !== undefined; }).map(function (s) {
+          return {
+            date: s.shift_date,
+            raw: pendingBalanceRawFor ? pendingBalanceRawFor(driverId, s.shift_date) : 0,
+            settlement: s.settlement || 'pendiente',
+          };
+        });
+        var pendingDays = days.filter(function (d) { return d.settlement === 'pendiente'; }).sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+        if (!pendingDays.length) break;
+        var nets = creditNets(days);
+        var target = pendingDays[0];
+        var net = nets[target.date];
+        var state = net > 0 ? 'recibido' : (net < 0 ? 'pagado' : 'recibido');
+        await api('/api/shifts', 'POST', { action: 'settle', driver_id: driverId, shift_date: target.date, settlement: state });
+        done += 1;
+      }
+      var check = await api('/api/shifts?driver_id=' + encodeURIComponent(driverId));
+      remaining = check.filter(function (s) { return s.exit_km !== null && s.exit_km !== undefined && (s.settlement || 'pendiente') === 'pendiente'; }).length;
+    } catch (e) { error = e; }
+    if (error) {
+      showMessage('Se marcaron ' + done + ' cierres de ' + name + ' y se detuvo por un error: ' + error.message + '. Revisá los cierres antes de reintentar.', 'error');
+    } else if (remaining > 0) {
+      showMessage('Se marcaron ' + done + ' cierres de ' + name + ' pero quedan ' + remaining + ' pendientes (tope de 500). Volvé a tocar Marcar como saldado para seguir.', 'error');
+    } else if (done === 0) {
+      showMessage('Ya no quedaban cierres pendientes para ' + name + '.', 'ok');
+    } else {
+      showMessage('Balance de ' + name + ' saldado: ' + done + ' cierres marcados. El balance vuelve a 0.', 'ok');
+    }
+    renderResumen();
+  }
+
   // ---------- Resumen (página principal del admin) ----------
 
   async function renderResumen() {
@@ -1277,6 +1503,13 @@
     try { closes = await api('/api/day-close?date=' + encodeURIComponent(today)); } catch (e) { closes = []; }
     var drivers = [];
     try { drivers = await api('/api/drivers'); } catch (e) { drivers = []; }
+    // Balances pendientes (solo admin; si la carga falla, el Resumen
+    // igual se muestra y solo esta sección avisa el error).
+    var balancesRows = null;
+    var balancesError = false;
+    if (user.role === 'admin') {
+      try { balancesRows = await loadPendingBalances(drivers); } catch (e) { balancesError = true; }
+    }
 
     var totalHoy = 0, viajesHoy = 0, enCalle = 0;
     closes.forEach(function (c) {
@@ -1365,7 +1598,12 @@
       }
     }
 
-    contentEl.innerHTML = '<h2>Resumen</h2>' +
+    var balancesHtml = '';
+    if (user.role === 'admin') {
+      if (balancesError) balancesHtml = '<h3>Balances pendientes</h3><div class="card"><p class="error">No se pudieron cargar los balances. Recargá la página para reintentar.</p></div>';
+      else if (balancesRows) balancesHtml = balancesSectionHtml(balancesRows);
+    }
+    contentEl.innerHTML = '<h2>Resumen</h2>' + balancesHtml +
       '<div class="card"><p class="muted">Hoy, ' + esc(today) + '</p>' +
       '<p class="big-number">' + money(totalHoy) + '</p>' +
       '<p>' + esc(viajesHoy) + ' viajes · ' + esc(enCalle) + ' de ' + esc(closes.length) + ' choferes en calle</p></div>' +
@@ -1398,6 +1636,10 @@
       card.addEventListener('click', function () {
         renderDriverDetail(card.getAttribute('data-driver-detail'));
       });
+    });
+    // Botón "Marcar como saldado" de cada balance pendiente.
+    contentEl.querySelectorAll('[data-settle-balance]').forEach(function (btn) {
+      btn.addEventListener('click', function () { settleBalance(btn); });
     });
   }
 
@@ -1788,7 +2030,7 @@
         '<p>Total recaudado</p><p class="big-number">' + money(c.total_collected) + '</p>' +
         '<p>Te quedás / Se queda el chofer: <strong>' + money(c.driver_keeps) + '</strong></p>' +
         '<p>Gastos del día: ' + money(c.expenses) + '</p>' +
-        '<p>' + handoverCashLine(c, 'El dueño te debe') + '</p>' + methodsLine(c) + creditLines(c) + settlementLine(c) + settlementButtons(c) +
+        '<p class="money-line">' + handoverCashLine(c, 'El dueño te debe') + '</p>' + methodsLine(c) + creditLines(c) + settlementLine(c) + settlementButtons(c) +
         (c.note ? '<p>Aclaraciones: ' + esc(c.note) + '</p>' : '') +
         '<p class="muted">Solo el efectivo entra al chofer; tarjeta, Uber y transferencias van a la cuenta del dueño. Los gastos se descuentan de la parte del dueño.</p></div>';
     }).join('');
@@ -1866,6 +2108,7 @@
     var shiftForm = document.getElementById('shift-form');
     shiftForm.addEventListener('submit', async function (ev) {
       ev.preventDefault();
+      if (!kmCierreValido(shiftForm.entry_km.value, shiftForm.exit_km.value)) return;
       try {
         await api('/api/shifts', 'POST', {
           driver_id: shiftForm.driver_id.value,

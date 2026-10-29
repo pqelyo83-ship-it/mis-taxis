@@ -1,4 +1,5 @@
-/* Mis Taxis — estilos mobile-first: botones grandes, uso con una mano. */
+/* Mis Taxis — estilos mobile-first: botones grandes, uso con una mano.
+   Sin modo oscuro ni animaciones pesadas. */
 
 * { box-sizing: border-box; }
 
@@ -7,6 +8,7 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   background: #f2f2f2;
   color: #222;
+  line-height: 1.45;
 }
 
 header {
@@ -16,6 +18,9 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 header h1 { margin: 0; font-size: 22px; }
@@ -33,8 +38,8 @@ header h1 { margin: 0; font-size: 22px; }
 
 main { max-width: 680px; margin: 0 auto; padding: 16px; }
 
-h2 { font-size: 20px; margin: 8px 0 12px; }
-h3 { font-size: 17px; margin: 18px 0 8px; }
+h2 { font-size: 24px; margin: 8px 0 14px; }
+h3 { font-size: 18px; margin: 26px 0 10px; }
 
 form { display: flex; flex-direction: column; gap: 10px; }
 
@@ -50,6 +55,8 @@ input, select, textarea {
   background: #fff;
 }
 
+input[type="checkbox"] { width: auto; min-height: auto; }
+
 button {
   font-size: 16px;
   min-height: 52px;
@@ -62,27 +69,37 @@ button {
   cursor: pointer;
 }
 
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid #111;
+  outline-offset: 2px;
+}
+
 button.secondary { background: #ddd; color: #222; }
 button.danger { background: #dc2626; color: #fff; }
-button.small { min-height: 40px; padding: 8px 12px; font-size: 14px; }
+button.small { min-height: 44px; padding: 10px 12px; font-size: 14px; }
 
 #tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
-#tabs button { background: #ddd; color: #222; }
+#tabs button { background: #ddd; color: #222; min-height: 44px; padding: 10px 12px; }
 #tabs button.active { background: #111; color: #fff; }
 
 .card {
   background: #fff;
-  border-radius: 12px;
-  padding: 14px;
-  margin-bottom: 12px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
 }
 
-.card p { margin: 4px 0; }
+.card p { margin: 6px 0; }
+.card h3 { margin-top: 0; }
 
-.big-number { font-size: 26px; font-weight: 800; margin: 4px 0; }
+.big-number { font-size: 32px; font-weight: 800; margin: 4px 0; }
 
-.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+/* Línea de entrega en efectivo: la cifra que el dueño y el chofer miran
+   primero. La dirección siempre va en palabras, nunca solo con color. */
+.money-line { font-size: 17px; font-weight: 700; }
+
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .row > * { flex: 1; }
 
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -91,10 +108,47 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eee; }
 
 .error { color: #b91c1c; font-weight: 600; }
 .ok { color: #15803d; font-weight: 600; }
-.perf-bar { background: #e5e5e5; height: 14px; border-radius: 7px; overflow: hidden; margin: 6px 0; }
+
+#message.ok, #message.error {
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-bottom: 12px;
+}
+#message.ok { background: #e6f4ea; }
+#message.error { background: #fdecea; }
+
+/* Barras de ranking y de comparación: solo magnitud, sin metas. */
+.perf-bar { background: #e8e8e8; height: 16px; border-radius: 8px; overflow: hidden; margin: 8px 0; }
 .perf-bar-fill { background: #eab308; height: 100%; }
 .perf-bar-fill-expense { background: #dc2626; height: 100%; }
-button.chip { background: #ddd; color: #222; }
+
+button.chip { background: #ddd; color: #222; min-height: 44px; padding: 10px 14px; border-radius: 999px; }
 button.chip.active { background: #111; color: #fff; }
 .hidden { display: none !important; }
 .muted { color: #666; font-size: 14px; }
+
+/* Indicador de pasos de "Mi día": refleja los estados que el código ya
+   distingue (sin jornada → jornada abierta → día cerrado). Oscuro = estás
+   acá, dorado = ya hecho, gris = falta. */
+.steps { display: flex; gap: 6px; margin-bottom: 14px; }
+.step {
+  flex: 1;
+  text-align: center;
+  padding: 10px 4px;
+  border-radius: 999px;
+  background: #e5e5e5;
+  color: #666;
+  font-size: 13px;
+  font-weight: 700;
+}
+.step.active { background: #111; color: #fff; }
+.step.done { background: #eab308; color: #111; }
+
+/* Balances pendientes (tope del Resumen, solo admin): la dirección del
+   dinero va en palabras y en grande; la barra compara magnitudes entre
+   choferes, no es una meta. */
+.balance-card .balance-name { font-size: 17px; margin-bottom: 2px; }
+.balance-card .balance-direction { font-size: 19px; font-weight: 800; margin: 4px 0; }
+.balance-card button { width: 100%; margin-top: 10px; }
+.balance-bar { background: #e8e8e8; height: 12px; border-radius: 6px; overflow: hidden; margin: 10px 0 2px; }
+.balance-bar-fill { background: #eab308; height: 100%; }
