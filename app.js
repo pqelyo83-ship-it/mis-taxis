@@ -1326,8 +1326,23 @@
     if (user.commission_day_pct !== undefined && user.commission_night_pct !== undefined) {
       pctNote = ' Tu %: día ' + esc(user.commission_day_pct) + '% · noche ' + esc(user.commission_night_pct) + '%.';
     }
-    var methodOptions = (methods && methods.length)
-      ? methods.map(function (m) {
+    // Orden del desplegable en Nuevo viaje (pedido del dueño, 2026-10-31):
+    // Efectivo primero, después Uber, después Tarjeta; el resto mantiene
+    // el orden que trae el backend (alfabético). Como el select no tiene
+    // opción preseleccionada, el navegador deja seleccionado el primero:
+    // Efectivo queda como método por defecto. Solo afecta a Nuevo viaje;
+    // la edición de viajes y los filtros siguen con el orden del backend
+    // (la edición preselecciona el método del viaje igual).
+    var methodRank = { 'efectivo': 0, 'uber': 1, 'tarjeta': 2 };
+    var orderedMethods = (methods || []).slice().sort(function (a, b) {
+      var ra = methodRank[String(a.name || '').trim().toLowerCase()];
+      var rb = methodRank[String(b.name || '').trim().toLowerCase()];
+      ra = (ra === undefined) ? 99 : ra;
+      rb = (rb === undefined) ? 99 : rb;
+      return ra - rb;
+    });
+    var methodOptions = (orderedMethods.length)
+      ? orderedMethods.map(function (m) {
           return '<option value="' + m.id + '">' + esc(m.name) + '</option>';
         }).join('')
       : '<option value="">Sin métodos de pago</option>';
