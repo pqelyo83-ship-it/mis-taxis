@@ -26,6 +26,7 @@ function publicExpense(row) {
     id: row.id,
     driver_id: row.driver_id,
     driver_name: row.driver_name || null,
+    shift_id: row.shift_id || null,
     expense_date: dateStr(row.expense_date),
     type: row.type,
     amount: row.amount,
@@ -109,9 +110,17 @@ module.exports = async function handler(req, res) {
       params.push(String(req.query.to));
       conditions.push('e.expense_date BETWEEN $' + fromIdx + ' AND $' + params.length);
     }
+    // Gastos de un turno (?shift_id=): el turno de noche incluye los
+    // gastos de la madrugada, aunque su fecha sea el día siguiente.
+    if (req.query && req.query.shift_id) {
+      params.push(Number(req.query.shift_id));
+      conditions.push('e.shift_id = $' + params.length);
+    }
     let join = '';
     if (req.query && req.query.taxi_id) {
-      join = ' LEFT JOIN day_shifts s ON s.driver_id = e.driver_id AND s.shift_date = e.expense_date AND s.company_id = e.company_id';
+      // El auto del gasto es el del turno al que está atado; si el
+      // gasto es viejo (sin turno), el de la jornada de su fecha.
+      join = ' LEFT JOIN day_shifts s ON s.company_id = e.company_id AND s.driver_id = e.driver_id AND ((e.shift_id IS NOT NULL AND s.id = e.shift_id) OR (e.shift_id IS NULL AND s.shift_date = e.expense_date))';
       params.push(Number(req.query.taxi_id));
       conditions.push('s.taxi_id = $' + params.length);
     }
@@ -150,10 +159,43 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'La foto de la factura es demasiado grande' });
       return;
     }
-    const result = await pool.query(
-      'INSERT INTO expenses (company_id, driver_id, expense_date, type, amount, note, receipt_image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [driver.rows[0].company_id, driverId, body.expense_date, body.type, amount, String(body.note || ''), receiptImage || null]
-    );
+    // El gasto queda atado al turno abierto del chofer (si tiene uno):
+    // así un gasto de nafta a las 02:00 cuenta en el cierre del turno
+    // de noche que empezó el día anterior. El admin puede pasar
+    // shift_id explícito; sin turno abierto el gasto queda sin atar y
+    // el cierre lo cuenta por fecha, como antes.
+    let expenseShiftId = null;
+    if (user.role === 'driver') {
+      const openShift = await pool.query(
+        'SELECT id FROM day_shifts WHERE driver_id = $1 AND company_id = $2 AND exit_km IS NULL ORDER BY shift_date DESC, id DESC LIMIT 1',
+        [driverId, driver.rows[0].company_id]
+      );
+      expenseShiftId = openShift.rows[0] ? openShift.rows[0].id : null;
+    } else if (body.shift_id) {
+      const given = await pool.query(
+        'SELECT id FROM day_shifts WHERE id = $1 AND driver_id = $2 AND company_id = $3',
+        [Number(body.shift_id), driverId, driver.rows[0].company_id]
+      );
+      expenseShiftId = given.rows[0] ? given.rows[0].id : null;
+    }
+    const result = await (async function insertExpense() {
+      try {
+        return await pool.query(
+          'INSERT INTO expenses (company_id, driver_id, expense_date, type, amount, note, receipt_image, shift_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+          [driver.rows[0].company_id, driverId, body.expense_date, body.type, amount, String(body.note || ''), receiptImage || null, expenseShiftId]
+        );
+      } catch (e) {
+        // Si la migración v11 todavía no se aplicó, el gasto se guarda
+        // igual (sin turno atado) en vez de trabar la carga.
+        if (e && e.code === '42703') {
+          return await pool.query(
+            'INSERT INTO expenses (company_id, driver_id, expense_date, type, amount, note, receipt_image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+            [driver.rows[0].company_id, driverId, body.expense_date, body.type, amount, String(body.note || ''), receiptImage || null]
+          );
+        }
+        throw e;
+      }
+    })();
     res.status(201).json(publicExpense(result.rows[0]));
     return;
   }

@@ -81,6 +81,13 @@ module.exports = async function handler(req, res) {
   if (taxiId) { tripParams.push(taxiId); tripCond.push('tr.taxi_id = $' + tripParams.length); }
   if (methodId) { tripParams.push(methodId); tripCond.push('tr.payment_method_id = $' + tripParams.length); }
   const tripWhere = 'WHERE ' + tripCond.join(' AND ');
+  // Versión por turno: el rango filtra por el día en que empezó el turno
+  // del viaje (un viaje de la 01:00 cuenta en el turno que empezó el día
+  // anterior, así que entra en el rango de ese día).
+  const tripCondAttr = tripCond.slice();
+  tripCondAttr[1] = 'COALESCE(sh.shift_date, tr.trip_date) BETWEEN $2 AND $3';
+  const tripWhereAttr = 'WHERE ' + tripCondAttr.join(' AND ');
+  const tripJoinAttr = ' LEFT JOIN day_shifts sh ON sh.id = tr.shift_id';
 
   // Condiciones para jornadas (por fecha de jornada). Siempre con empresa.
   const shiftCond = ['s.company_id = $1', 's.shift_date BETWEEN $2 AND $3'];
@@ -89,44 +96,93 @@ module.exports = async function handler(req, res) {
   if (taxiId) { shiftParams.push(taxiId); shiftCond.push('s.taxi_id = $' + shiftParams.length); }
   const shiftWhere = 'WHERE ' + shiftCond.join(' AND ');
 
-  const tripsByDay = await pool.query(
-    `SELECT tr.trip_date, COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
-            COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
-            COALESCE(SUM(CASE WHEN pm.id IS NULL THEN tr.amount ELSE 0 END), 0) AS unclassified,
-            COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
-     FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id ${tripWhere} GROUP BY tr.trip_date ORDER BY tr.trip_date`,
-    tripParams
-  );
+  // Viajes por día: cada viaje cuenta en el día en que EMPEZÓ su turno
+  // (un viaje de la 01:00 de la madrugada cuenta en el turno de noche
+  // que empezó el día anterior, no en un día aparte). Los viajes viejos
+  // sin turno atado cuentan por su fecha, como antes.
+  let tripsByDay;
+  try {
+    tripsByDay = await pool.query(
+      `SELECT COALESCE(sh.shift_date, tr.trip_date) AS trip_date, COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
+              COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
+              COALESCE(SUM(CASE WHEN pm.id IS NULL THEN tr.amount ELSE 0 END), 0) AS unclassified,
+              COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
+       FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id
+       LEFT JOIN day_shifts sh ON sh.id = tr.shift_id ${tripWhereAttr} GROUP BY COALESCE(sh.shift_date, tr.trip_date) ORDER BY COALESCE(sh.shift_date, tr.trip_date)`,
+      tripParams
+    );
+  } catch (e) {
+    if (e && e.code === '42703') {
+      tripsByDay = await pool.query(
+        `SELECT tr.trip_date, COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
+                COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
+                COALESCE(SUM(CASE WHEN pm.id IS NULL THEN tr.amount ELSE 0 END), 0) AS unclassified,
+                COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
+         FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id ${tripWhere} GROUP BY tr.trip_date ORDER BY tr.trip_date`,
+        tripParams
+      );
+    } else throw e;
+  }
   const kmByDay = await pool.query(
     `SELECT s.shift_date, COALESCE(SUM(s.exit_km - s.entry_km), 0) AS km
      FROM day_shifts s ${shiftWhere} AND s.exit_km IS NOT NULL
      GROUP BY s.shift_date ORDER BY s.shift_date`,
     shiftParams
   );
-  const tripsByDriver = await pool.query(
-    `SELECT tr.driver_id, u.name AS driver_name, COUNT(*) AS trips,
-            COALESCE(SUM(tr.amount), 0) AS total,
-            COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
-            COALESCE(SUM(CASE WHEN pm.id IS NULL THEN tr.amount ELSE 0 END), 0) AS unclassified,
-            COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
-     FROM trips tr JOIN users u ON u.id = tr.driver_id
-     LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id ${tripWhere}
-     GROUP BY tr.driver_id, u.name ORDER BY total DESC`,
-    tripParams
-  );
+  let tripsByDriver;
+  try {
+    tripsByDriver = await pool.query(
+      `SELECT tr.driver_id, u.name AS driver_name, COUNT(*) AS trips,
+              COALESCE(SUM(tr.amount), 0) AS total,
+              COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
+              COALESCE(SUM(CASE WHEN pm.id IS NULL THEN tr.amount ELSE 0 END), 0) AS unclassified,
+              COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
+       FROM trips tr JOIN users u ON u.id = tr.driver_id
+       LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id${tripJoinAttr} ${tripWhereAttr}
+       GROUP BY tr.driver_id, u.name ORDER BY total DESC`,
+      tripParams
+    );
+  } catch (e) {
+    if (e && e.code === '42703') {
+      tripsByDriver = await pool.query(
+        `SELECT tr.driver_id, u.name AS driver_name, COUNT(*) AS trips,
+                COALESCE(SUM(tr.amount), 0) AS total,
+                COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
+                COALESCE(SUM(CASE WHEN pm.id IS NULL THEN tr.amount ELSE 0 END), 0) AS unclassified,
+                COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
+         FROM trips tr JOIN users u ON u.id = tr.driver_id
+         LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id ${tripWhere}
+         GROUP BY tr.driver_id, u.name ORDER BY total DESC`,
+        tripParams
+      );
+    } else throw e;
+  }
   const kmByDriver = await pool.query(
     `SELECT s.driver_id, COALESCE(SUM(s.exit_km - s.entry_km), 0) AS km
      FROM day_shifts s ${shiftWhere} AND s.exit_km IS NOT NULL
      GROUP BY s.driver_id`,
     shiftParams
   );
-  const tripsByTaxi = await pool.query(
-    `SELECT tr.taxi_id, t.identifier AS taxi_identifier, COUNT(*) AS trips,
-            COALESCE(SUM(tr.amount), 0) AS total
-     FROM trips tr LEFT JOIN taxis t ON t.id = tr.taxi_id ${tripWhere}
-     GROUP BY tr.taxi_id, t.identifier ORDER BY total DESC`,
-    tripParams
-  );
+  let tripsByTaxi;
+  try {
+    tripsByTaxi = await pool.query(
+      `SELECT tr.taxi_id, t.identifier AS taxi_identifier, COUNT(*) AS trips,
+              COALESCE(SUM(tr.amount), 0) AS total
+       FROM trips tr LEFT JOIN taxis t ON t.id = tr.taxi_id${tripJoinAttr} ${tripWhereAttr}
+       GROUP BY tr.taxi_id, t.identifier ORDER BY total DESC`,
+      tripParams
+    );
+  } catch (e) {
+    if (e && e.code === '42703') {
+      tripsByTaxi = await pool.query(
+        `SELECT tr.taxi_id, t.identifier AS taxi_identifier, COUNT(*) AS trips,
+                COALESCE(SUM(tr.amount), 0) AS total
+         FROM trips tr LEFT JOIN taxis t ON t.id = tr.taxi_id ${tripWhere}
+         GROUP BY tr.taxi_id, t.identifier ORDER BY total DESC`,
+        tripParams
+      );
+    } else throw e;
+  }
   const kmByTaxi = await pool.query(
     `SELECT s.taxi_id, COALESCE(SUM(s.exit_km - s.entry_km), 0) AS km
      FROM day_shifts s ${shiftWhere} AND s.exit_km IS NOT NULL
@@ -134,31 +190,59 @@ module.exports = async function handler(req, res) {
     shiftParams
   );
 
-  // Gastos: filtro de chofer directo; filtro de taxi vía la jornada del día.
-  // Siempre con empresa.
+  // Gastos: filtro de chofer directo; filtro de taxi vía el turno al que
+  // está atado el gasto (o la jornada de su fecha si es viejo). Los
+  // gastos por día cuentan en el día en que empezó su turno, igual que
+  // los viajes. Siempre con empresa.
   const expCond = ['e.company_id = $1', 'e.expense_date BETWEEN $2 AND $3'];
   const expParams = [user.company_id, from, to];
-  let expJoin = '';
   if (driverId) { expParams.push(driverId); expCond.push('e.driver_id = $' + expParams.length); }
   if (taxiId) {
-    expJoin = ' LEFT JOIN day_shifts s ON s.driver_id = e.driver_id AND s.shift_date = e.expense_date';
     expParams.push(taxiId);
     expCond.push('s.taxi_id = $' + expParams.length);
   }
-  const expenses = await pool.query(
-    `SELECT COALESCE(SUM(e.amount), 0) AS total FROM expenses e${expJoin} WHERE ${expCond.join(' AND ')}`,
-    expParams
-  );
+  const expCondAttr = expCond.slice();
+  expCondAttr[1] = 'COALESCE(s2.shift_date, e.expense_date) BETWEEN $2 AND $3';
+  async function runExpenseQueries(aware) {
+    const expJoin = taxiId
+      ? (aware
+        ? ' LEFT JOIN day_shifts s ON s.company_id = e.company_id AND s.driver_id = e.driver_id AND ((e.shift_id IS NOT NULL AND s.id = e.shift_id) OR (e.shift_id IS NULL AND s.shift_date = e.expense_date))'
+        : ' LEFT JOIN day_shifts s ON s.driver_id = e.driver_id AND s.shift_date = e.expense_date AND s.company_id = e.company_id')
+      : '';
+    const attrJoin = aware ? ' LEFT JOIN day_shifts s2 ON s2.id = e.shift_id' : '';
+    const cond = aware ? expCondAttr : expCond;
+    const total = await pool.query(
+      `SELECT COALESCE(SUM(e.amount), 0) AS total FROM expenses e${attrJoin}${expJoin} WHERE ${cond.join(' AND ')}`,
+      expParams
+    );
+    const byDay = aware
+      ? await pool.query(
+          `SELECT COALESCE(s2.shift_date, e.expense_date) AS expense_date, COALESCE(SUM(e.amount), 0) AS total FROM expenses e${attrJoin}${expJoin} WHERE ${cond.join(' AND ')} GROUP BY COALESCE(s2.shift_date, e.expense_date)`,
+          expParams
+        )
+      : await pool.query(
+          `SELECT e.expense_date, COALESCE(SUM(e.amount), 0) AS total FROM expenses e${expJoin} WHERE ${cond.join(' AND ')} GROUP BY e.expense_date`,
+          expParams
+        );
+    const byDriver = await pool.query(
+      `SELECT e.driver_id, COALESCE(SUM(e.amount), 0) AS total FROM expenses e${attrJoin}${expJoin} WHERE ${cond.join(' AND ')} GROUP BY e.driver_id`,
+      expParams
+    );
+    return { total: total, byDay: byDay, byDriver: byDriver };
+  }
+  let expenseResults;
+  try {
+    expenseResults = await runExpenseQueries(true);
+  } catch (e) {
+    // Sin migración v11: gastos por fecha, como antes.
+    if (e && e.code === '42703') expenseResults = await runExpenseQueries(false);
+    else throw e;
+  }
+  const expenses = expenseResults.total;
   // Gastos por día y por chofer (mismos filtros que el total): necesarios
   // para la entrega en efectivo por día y por chofer.
-  const expensesByDay = await pool.query(
-    `SELECT e.expense_date, COALESCE(SUM(e.amount), 0) AS total FROM expenses e${expJoin} WHERE ${expCond.join(' AND ')} GROUP BY e.expense_date`,
-    expParams
-  );
-  const expensesByDriver = await pool.query(
-    `SELECT e.driver_id, COALESCE(SUM(e.amount), 0) AS total FROM expenses e${expJoin} WHERE ${expCond.join(' AND ')} GROUP BY e.driver_id`,
-    expParams
-  );
+  const expensesByDay = expenseResults.byDay;
+  const expensesByDriver = expenseResults.byDriver;
 
   const kmMap = {};
   kmByDay.rows.forEach(function (r) { kmMap[dateStr(r.shift_date)] = Number(r.km); });
@@ -192,13 +276,13 @@ module.exports = async function handler(req, res) {
   let creditShifts;
   try {
     creditShifts = await pool.query(
-      `SELECT s.driver_id, s.shift_date, s.settlement FROM day_shifts s WHERE ${creditShiftCond} ORDER BY s.driver_id, s.shift_date, s.id`,
+      `SELECT s.id, s.driver_id, s.shift_date, s.settlement FROM day_shifts s WHERE ${creditShiftCond} ORDER BY s.driver_id, s.shift_date, s.id`,
       creditShiftParams
     );
   } catch (e) {
     if (e && e.code === '42703') {
       creditShifts = await pool.query(
-        `SELECT s.driver_id, s.shift_date FROM day_shifts s WHERE ${creditShiftCond} ORDER BY s.driver_id, s.shift_date, s.id`,
+        `SELECT s.id, s.driver_id, s.shift_date FROM day_shifts s WHERE ${creditShiftCond} ORDER BY s.driver_id, s.shift_date, s.id`,
         creditShiftParams
       );
     } else throw e;
@@ -206,66 +290,148 @@ module.exports = async function handler(req, res) {
   const creditTripParams = [user.company_id];
   let creditTripCond = 'tr.company_id = $1';
   if (driverId) { creditTripParams.push(driverId); creditTripCond += ' AND tr.driver_id = $' + creditTripParams.length; }
-  const creditTrips = await pool.query(
-    `SELECT tr.driver_id, tr.trip_date,
-            COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
-            COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
-     FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id
-     WHERE ${creditTripCond} GROUP BY tr.driver_id, tr.trip_date`,
-    creditTripParams
-  );
+  let creditTrips;
+  try {
+    creditTrips = await pool.query(
+      `SELECT tr.driver_id, tr.shift_id, tr.trip_date,
+              COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
+              COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
+       FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id
+       WHERE ${creditTripCond} GROUP BY tr.driver_id, tr.shift_id, tr.trip_date`,
+      creditTripParams
+    );
+  } catch (e) {
+    if (e && e.code === '42703') {
+      creditTrips = await pool.query(
+        `SELECT tr.driver_id, tr.trip_date,
+                COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps,
+                COALESCE(SUM(CASE WHEN LOWER(TRIM(pm.name)) = 'efectivo' THEN tr.amount ELSE 0 END), 0) AS cash
+         FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id
+         WHERE ${creditTripCond} GROUP BY tr.driver_id, tr.trip_date`,
+        creditTripParams
+      );
+    } else throw e;
+  }
   const creditExpParams = [user.company_id];
   let creditExpCond = 'e.company_id = $1';
   if (driverId) { creditExpParams.push(driverId); creditExpCond += ' AND e.driver_id = $' + creditExpParams.length; }
-  const creditExpenses = await pool.query(
-    `SELECT e.driver_id, e.expense_date, COALESCE(SUM(e.amount), 0) AS total FROM expenses e WHERE ${creditExpCond} GROUP BY e.driver_id, e.expense_date`,
-    creditExpParams
-  );
+  let creditExpenses;
+  try {
+    creditExpenses = await pool.query(
+      `SELECT e.driver_id, e.shift_id, e.expense_date, COALESCE(SUM(e.amount), 0) AS total FROM expenses e WHERE ${creditExpCond} GROUP BY e.driver_id, e.shift_id, e.expense_date`,
+      creditExpParams
+    );
+  } catch (e) {
+    if (e && e.code === '42703') {
+      creditExpenses = await pool.query(
+        `SELECT e.driver_id, e.expense_date, COALESCE(SUM(e.amount), 0) AS total FROM expenses e WHERE ${creditExpCond} GROUP BY e.driver_id, e.expense_date`,
+        creditExpParams
+      );
+    } else throw e;
+  }
   const creditNames = await pool.query(
     `SELECT id, name FROM users WHERE company_id = $1${driverId ? ' AND id = $2' : ''}`,
     driverId ? [user.company_id, driverId] : [user.company_id]
   );
-  const creditTripMap = {};
+  // Turnos cerrados por chofer, en orden cronológico (fecha de inicio y
+  // luego id: un día puede tener más de un turno).
+  const creditClosedShifts = {};
+  creditShifts.rows.forEach(function (r) {
+    if (!creditClosedShifts[r.driver_id]) creditClosedShifts[r.driver_id] = [];
+    creditClosedShifts[r.driver_id].push({ id: r.id, date: dateStr(r.shift_date), settlement: r.settlement || 'pendiente' });
+  });
+  const shiftDateById = {};
+  creditShifts.rows.forEach(function (r) { shiftDateById[r.id] = dateStr(r.shift_date); });
+  // Viajes y gastos por turno (shift_id) y, para los viejos sin turno,
+  // por fecha. También se arman los mapas por fecha de atribución (día
+  // en que empezó el turno, o fecha del viaje/gasto si no hay turno)
+  // para las fechas con actividad pero sin turno cerrado.
+  const creditTripByShift = {};
+  const creditTripLegacy = {};
+  const creditTripAttr = {};
   creditTrips.rows.forEach(function (r) {
-    if (!creditTripMap[r.driver_id]) creditTripMap[r.driver_id] = {};
-    creditTripMap[r.driver_id][dateStr(r.trip_date)] = r;
+    const did = r.driver_id;
+    const cash = round2(r.cash);
+    const keeps = round2(r.keeps);
+    if (r.shift_id !== null && r.shift_id !== undefined) {
+      if (!creditTripByShift[did]) creditTripByShift[did] = {};
+      const prev = creditTripByShift[did][r.shift_id] || { cash: 0, keeps: 0 };
+      creditTripByShift[did][r.shift_id] = { cash: round2(prev.cash + cash), keeps: round2(prev.keeps + keeps) };
+      const d = shiftDateById[r.shift_id] || dateStr(r.trip_date);
+      if (!creditTripAttr[did]) creditTripAttr[did] = {};
+      const prevA = creditTripAttr[did][d] || { cash: 0, keeps: 0 };
+      creditTripAttr[did][d] = { cash: round2(prevA.cash + cash), keeps: round2(prevA.keeps + keeps) };
+    } else {
+      const d = dateStr(r.trip_date);
+      if (!creditTripLegacy[did]) creditTripLegacy[did] = {};
+      const prev = creditTripLegacy[did][d] || { cash: 0, keeps: 0 };
+      creditTripLegacy[did][d] = { cash: round2(prev.cash + cash), keeps: round2(prev.keeps + keeps) };
+      if (!creditTripAttr[did]) creditTripAttr[did] = {};
+      const prevA = creditTripAttr[did][d] || { cash: 0, keeps: 0 };
+      creditTripAttr[did][d] = { cash: round2(prevA.cash + cash), keeps: round2(prevA.keeps + keeps) };
+    }
   });
-  const creditExpMap = {};
+  const creditExpByShift = {};
+  const creditExpLegacy = {};
+  const creditExpAttr = {};
   creditExpenses.rows.forEach(function (r) {
-    if (!creditExpMap[r.driver_id]) creditExpMap[r.driver_id] = {};
-    creditExpMap[r.driver_id][dateStr(r.expense_date)] = Number(r.total);
-  });
-  const creditClosedMap = {};
-  creditShifts.rows.forEach(function (r) {
-    if (!creditClosedMap[r.driver_id]) creditClosedMap[r.driver_id] = [];
-    creditClosedMap[r.driver_id].push(dateStr(r.shift_date));
-  });
-  const creditSettlementMap = {};
-  creditShifts.rows.forEach(function (r) {
-    if (!creditSettlementMap[r.driver_id]) creditSettlementMap[r.driver_id] = {};
-    creditSettlementMap[r.driver_id][dateStr(r.shift_date)] = r.settlement || 'pendiente';
+    const did = r.driver_id;
+    const total = round2(r.total);
+    if (r.shift_id !== null && r.shift_id !== undefined) {
+      if (!creditExpByShift[did]) creditExpByShift[did] = {};
+      creditExpByShift[did][r.shift_id] = round2((creditExpByShift[did][r.shift_id] || 0) + total);
+      const d = shiftDateById[r.shift_id] || dateStr(r.expense_date);
+      if (!creditExpAttr[did]) creditExpAttr[did] = {};
+      creditExpAttr[did][d] = round2((creditExpAttr[did][d] || 0) + total);
+    } else {
+      const d = dateStr(r.expense_date);
+      if (!creditExpLegacy[did]) creditExpLegacy[did] = {};
+      creditExpLegacy[did][d] = round2((creditExpLegacy[did][d] || 0) + total);
+      if (!creditExpAttr[did]) creditExpAttr[did] = {};
+      creditExpAttr[did][d] = round2((creditExpAttr[did][d] || 0) + total);
+    }
   });
   const creditNameMap = {};
   creditNames.rows.forEach(function (r) { creditNameMap[r.id] = r.name; });
   function driverCreditData(driverIdKey) {
-    const closedDates = (creditClosedMap[driverIdKey] || []).slice().sort();
-    const tMap = creditTripMap[driverIdKey] || {};
-    const eMap = creditExpMap[driverIdKey] || {};
-    const sMap = creditSettlementMap[driverIdKey] || {};
-    function rawFor(d) {
-      const t = tMap[d];
-      const cash = t ? round2(t.cash) : 0;
-      const keeps = t ? round2(t.keeps) : 0;
-      const exp = eMap[d] !== undefined ? round2(eMap[d]) : 0;
+    const shifts = (creditClosedShifts[driverIdKey] || []).slice();
+    const tByShift = creditTripByShift[driverIdKey] || {};
+    const tLegacy = creditTripLegacy[driverIdKey] || {};
+    const eByShift = creditExpByShift[driverIdKey] || {};
+    const eLegacy = creditExpLegacy[driverIdKey] || {};
+    const tAttr = creditTripAttr[driverIdKey] || {};
+    const eAttr = creditExpAttr[driverIdKey] || {};
+    // Los viejos sin turno solo cuentan en el primer turno cerrado de su
+    // fecha (si un día tiene dos turnos, no se duplican).
+    const firstClosedByDate = {};
+    shifts.forEach(function (s) {
+      if (firstClosedByDate[s.date] === undefined) firstClosedByDate[s.date] = s.id;
+    });
+    function rawForShift(s) {
+      const ht = tByShift[s.id] || { cash: 0, keeps: 0 };
+      const legacy = firstClosedByDate[s.date] === s.id ? (tLegacy[s.date] || { cash: 0, keeps: 0 }) : { cash: 0, keeps: 0 };
+      const cash = round2(ht.cash + legacy.cash);
+      const keeps = round2(ht.keeps + legacy.keeps);
+      const exp = round2((eByShift[s.id] || 0) + (firstClosedByDate[s.date] === s.id ? (eLegacy[s.date] || 0) : 0));
       return round2(cash - keeps - exp);
     }
-    // Paso único: saldo acumulado con lotes implícitos. Un día marcado
+    function rawFor(d) {
+      const t = tAttr[d];
+      const cash = t ? round2(t.cash) : 0;
+      const keeps = t ? round2(t.keeps) : 0;
+      const exp = eAttr[d] !== undefined ? round2(eAttr[d]) : 0;
+      return round2(cash - keeps - exp);
+    }
+    // Paso único: saldo acumulado con lotes implícitos. Un turno marcado
     // "pagado" no genera saldo (el dueño ya pagó esa deuda en mano), así
-    // que los días siguientes se calculan sin ese descuento.
+    // que los turnos siguientes se calculan sin ese descuento. La
+    // secuencia es por turno; el mapa por fecha agrega los turnos del
+    // mismo día (before del primero, applied/net sumados, after del
+    // último) para la tabla por día.
     const byDate = {};
     let credit = 0;
-    closedDates.forEach(function (d) {
-      const raw = rawFor(d);
+    shifts.forEach(function (s) {
+      const raw = rawForShift(s);
       const before = round2(credit);
       let applied = 0;
       let paid = 0;
@@ -273,20 +439,26 @@ module.exports = async function handler(req, res) {
         applied = round2(Math.min(credit, raw));
         credit = round2(credit - applied);
       } else if (raw < 0) {
-        if ((sMap[d] || 'pendiente') === 'pagado') paid = round2(-raw);
+        if ((s.settlement || 'pendiente') === 'pagado') paid = round2(-raw);
         else credit = round2(credit - raw);
       }
-      byDate[d] = { before: before, applied: applied, net: round2(raw - applied), after: round2(credit), settlement: sMap[d] || 'pendiente', paid: paid };
+      const row = byDate[s.date] || (byDate[s.date] = { before: before, applied: 0, net: 0, after: 0, settlement: s.settlement || 'pendiente', paid: 0 });
+      row.applied = round2(row.applied + applied);
+      row.net = round2(row.net + round2(raw - applied));
+      row.after = round2(credit);
+      row.settlement = s.settlement || 'pendiente';
+      row.paid = round2(row.paid + paid);
     });
+    const closedDates = Object.keys(byDate).sort();
     const activityDates = {};
-    Object.keys(tMap).forEach(function (d) { activityDates[d] = true; });
-    Object.keys(eMap).forEach(function (d) { activityDates[d] = true; });
+    Object.keys(tAttr).forEach(function (d) { activityDates[d] = true; });
+    Object.keys(eAttr).forEach(function (d) { activityDates[d] = true; });
     return { closedDates: closedDates, byDate: byDate, rawFor: rawFor, activityDates: activityDates };
   }
   const creditDriverIds = {};
-  Object.keys(creditClosedMap).forEach(function (id) { creditDriverIds[id] = true; });
-  Object.keys(creditTripMap).forEach(function (id) { creditDriverIds[id] = true; });
-  Object.keys(creditExpMap).forEach(function (id) { creditDriverIds[id] = true; });
+  Object.keys(creditClosedShifts).forEach(function (id) { creditDriverIds[id] = true; });
+  Object.keys(creditTripAttr).forEach(function (id) { creditDriverIds[id] = true; });
+  Object.keys(creditExpAttr).forEach(function (id) { creditDriverIds[id] = true; });
   const creditByDriver = {};
   Object.keys(creditDriverIds).forEach(function (id) { creditByDriver[id] = driverCreditData(id); });
   const creditDayMap = {};
@@ -411,14 +583,28 @@ module.exports = async function handler(req, res) {
   });
 
   // Desglose por método de pago (cuánto entró por Efectivo, Tarjeta, etc.).
-  const tripsByMethod = await pool.query(
-    `SELECT tr.payment_method_id AS method_id, COALESCE(pm.name, 'Sin método') AS method_name,
-            COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
-            COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps
-     FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id ${tripWhere}
-     GROUP BY tr.payment_method_id, pm.name ORDER BY total DESC`,
-    tripParams
-  );
+  let tripsByMethod;
+  try {
+    tripsByMethod = await pool.query(
+      `SELECT tr.payment_method_id AS method_id, COALESCE(pm.name, 'Sin método') AS method_name,
+              COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
+              COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps
+       FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id${tripJoinAttr} ${tripWhereAttr}
+       GROUP BY tr.payment_method_id, pm.name ORDER BY total DESC`,
+      tripParams
+    );
+  } catch (e) {
+    if (e && e.code === '42703') {
+      tripsByMethod = await pool.query(
+        `SELECT tr.payment_method_id AS method_id, COALESCE(pm.name, 'Sin método') AS method_name,
+                COUNT(*) AS trips, COALESCE(SUM(tr.amount), 0) AS total,
+                COALESCE(SUM(tr.amount * tr.pct_snapshot / 100), 0) AS keeps
+         FROM trips tr LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id ${tripWhere}
+         GROUP BY tr.payment_method_id, pm.name ORDER BY total DESC`,
+        tripParams
+      );
+    } else throw e;
+  }
   const perMethod = tripsByMethod.rows.map(function (r) {
     return {
       method_id: r.method_id,

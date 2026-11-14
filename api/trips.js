@@ -35,6 +35,8 @@ function withSplit(row) {
     driver_name: row.driver_name || null,
     taxi_id: row.taxi_id,
     taxi_identifier: row.taxi_identifier || null,
+    shift_id: row.shift_id || null,
+    shift_date: row.shift_date ? dateStr(row.shift_date) : null,
     trip_date: dateStr(row.trip_date),
     entry_time: row.entry_time,
     entry_km: row.entry_km,
@@ -92,11 +94,13 @@ function optionalDestination(body) {
 
 const SELECT_SQL = `
   SELECT tr.*, u.name AS driver_name, t.identifier AS taxi_identifier,
-         pm.name AS payment_method_name
+         pm.name AS payment_method_name,
+         sh.shift_date AS shift_date
   FROM trips tr
   JOIN users u ON u.id = tr.driver_id
   LEFT JOIN taxis t ON t.id = tr.taxi_id
   LEFT JOIN payment_methods pm ON pm.id = tr.payment_method_id
+  LEFT JOIN day_shifts sh ON sh.id = tr.shift_id
 `;
 
 module.exports = async function handler(req, res) {
@@ -191,6 +195,12 @@ module.exports = async function handler(req, res) {
       params.push(String(req.query.date));
       conditions.push('tr.trip_date = $' + params.length);
     }
+    // Viajes de un turno (?shift_id=): el turno de noche incluye los
+    // viajes de la madrugada, aunque su trip_date sea el día siguiente.
+    if (req.query && req.query.shift_id) {
+      params.push(Number(req.query.shift_id));
+      conditions.push('tr.shift_id = $' + params.length);
+    }
     if (req.query && req.query.taxi_id) {
       params.push(Number(req.query.taxi_id));
       conditions.push('tr.taxi_id = $' + params.length);
@@ -207,7 +217,7 @@ module.exports = async function handler(req, res) {
     else if (req.query && (req.query.from || req.query.to)) limitSql = '';
     else limitSql = ' LIMIT 100';
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-    const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY tr.trip_date DESC, tr.entry_time DESC' + limitSql, params);
+    const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY tr.trip_date DESC, tr.id DESC' + limitSql, params);
     res.status(200).json(result.rows.map(withSplit));
     return;
   }
@@ -233,29 +243,49 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Datos del viaje inválidos (revisá fecha y monto)' });
       return;
     }
-    // Sin día empezado no hay viaje: el chofer solo carga viajes de un
-    // día con jornada (abierta o cerrada). El admin puede cargar y
-    // corregir para cualquier chofer y fecha. Editar un viaje viejo no
+    // Sin turno abierto no hay viaje: el chofer solo carga viajes
+    // mientras tiene un turno abierto (que puede haber empezado ayer:
+    // el turno de noche sigue vigente de madrugada y los viajes de las
+    // 01:00 o las 03:00 se atan a ese turno, aunque su fecha sea el día
+    // siguiente). El admin puede cargar y corregir para cualquier chofer
+    // y fecha, con turno explícito o sin él. Editar un viaje viejo no
     // se bloquea: el día ya se empezó en su momento.
+    let openShift = null;
     if (user.role === 'driver') {
       const shift = await pool.query(
-        'SELECT id FROM day_shifts WHERE driver_id = $1 AND shift_date = $2 AND company_id = $3',
-        [driverId, body.trip_date, driver.rows[0].company_id]
+        'SELECT id, taxi_id, shift_date FROM day_shifts WHERE driver_id = $1 AND company_id = $2 AND exit_km IS NULL ORDER BY shift_date DESC, id DESC LIMIT 1',
+        [driverId, driver.rows[0].company_id]
       );
-      if (!shift.rows[0]) {
+      openShift = shift.rows[0] || null;
+      if (!openShift) {
         res.status(400).json({ error: 'Primero tenés que empezar el día para cargar viajes' });
         return;
       }
+    } else if (body.shift_id) {
+      const shift = await pool.query(
+        'SELECT id, taxi_id, shift_date FROM day_shifts WHERE id = $1 AND driver_id = $2 AND company_id = $3',
+        [Number(body.shift_id), driverId, driver.rows[0].company_id]
+      );
+      openShift = shift.rows[0] || null;
+      if (!openShift) {
+        res.status(400).json({ error: 'Turno inválido' });
+        return;
+      }
     }
-    // El taxi del viaje: el de la jornada de ese día, si hay una;
-    // si no, el taxi asignado al chofer. Los viajes ya no llevan horas ni km.
+    // El taxi del viaje: el del turno abierto; si no hay turno (admin
+    // sin shift_id), el de la jornada de ese día si hay una; si no, el
+    // taxi asignado al chofer. Los viajes ya no llevan horas ni km.
     let taxiId = body.taxi_id ? Number(body.taxi_id) : null;
     if (!taxiId) {
-      const shift = await pool.query(
-        'SELECT taxi_id FROM day_shifts WHERE driver_id = $1 AND shift_date = $2',
-        [driverId, body.trip_date]
-      );
-      taxiId = shift.rows[0] ? shift.rows[0].taxi_id : driver.rows[0].taxi_id;
+      if (openShift) {
+        taxiId = openShift.taxi_id;
+      } else {
+        const shift = await pool.query(
+          'SELECT taxi_id FROM day_shifts WHERE driver_id = $1 AND shift_date = $2',
+          [driverId, body.trip_date]
+        );
+        taxiId = shift.rows[0] ? shift.rows[0].taxi_id : driver.rows[0].taxi_id;
+      }
     }
     const geo = geoPair(body);
     // Método de pago: debe ser uno activo de la empresa del chofer.
@@ -271,11 +301,26 @@ module.exports = async function handler(req, res) {
       }
       paymentMethodId = pm.rows[0].id;
     }
-    const inserted = await pool.query(
-      `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng, payment_method_id, tip, destination)
-       VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-      [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null, paymentMethodId, tip, destination]
-    );
+    const inserted = await (async function insertTrip() {
+      try {
+        return await pool.query(
+          `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng, payment_method_id, tip, destination, shift_id)
+           VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+          [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null, paymentMethodId, tip, destination, openShift ? openShift.id : null]
+        );
+      } catch (e) {
+        // Si la migración v11 todavía no se aplicó, el viaje se guarda
+        // igual (sin turno atado) en vez de trabar la carga.
+        if (e && e.code === '42703') {
+          return await pool.query(
+            `INSERT INTO trips (company_id, driver_id, taxi_id, trip_date, entry_time, entry_km, exit_time, exit_km, amount, pct_snapshot, shift_type, trip_lat, trip_lng, payment_method_id, tip, destination)
+             VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+            [driver.rows[0].company_id, driverId, taxiId, body.trip_date, amount, pct, shiftType, geo ? geo.lat : null, geo ? geo.lng : null, paymentMethodId, tip, destination]
+          );
+        }
+        throw e;
+      }
+    })();
     const full = await pool.query(SELECT_SQL + ' WHERE tr.id = $1', [inserted.rows[0].id]);
     res.status(201).json(withSplit(full.rows[0]));
     return;

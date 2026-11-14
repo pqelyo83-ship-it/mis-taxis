@@ -143,7 +143,13 @@
         if (state === 'pagado' && !confirm('Marcar pagado significa que ya le pagaste este saldo en mano. Los días siguientes se calculan sin este descuento (si ya lo habían descontado, quedan pendientes). ¿Confirmás?')) return;
         if (state === 'pendiente' && prev === 'pagado' && !confirm('Quitar la marca vuelve a generar el saldo de este día: los días siguientes se recalculan con ese descuento. ¿Confirmás?')) return;
         try {
-          await api('/api/shifts', 'POST', { action: 'settle', driver_id: btn.getAttribute('data-settle-driver'), shift_date: btn.getAttribute('data-settle-date'), settlement: state });
+          var settleBody = { action: 'settle', settlement: state };
+          if (btn.getAttribute('data-settle-shift')) settleBody.shift_id = btn.getAttribute('data-settle-shift');
+          else {
+            settleBody.driver_id = btn.getAttribute('data-settle-driver');
+            settleBody.shift_date = btn.getAttribute('data-settle-date');
+          }
+          await api('/api/shifts', 'POST', settleBody);
           showMessage('Liquidación actualizada.', 'ok');
           if (reload) reload();
         } catch (e) { showMessage(e.message, 'error'); }
@@ -287,18 +293,24 @@
     return lines.join('\n');
   }
 
-  // Carga los pendientes del día que se está cerrando (la fecha del
-  // formulario de renderDay, que en el flujo normal es hoy; si se cierra
-  // una jornada abierta vieja, corresponde a esa fecha, no a hoy). El
-  // chofer siempre ve solo sus datos (el backend fuerza su driver_id);
-  // el admin filtra por el chofer de la jornada. limit=all evita el tope
-  // de 100 por defecto. Si cualquier consulta falla, devuelve null y el
-  // cierre sigue sin aviso ni confirm (nunca bloquea).
-  async function cargarPendientesCierre(date, driverId) {
+  // Carga los pendientes del turno que se está cerrando (si se pasa
+  // shiftId, los viajes y gastos de ese turno, incluidos los de la
+  // madrugada; si no, los de la fecha). El chofer siempre ve solo sus
+  // datos (el backend fuerza su driver_id); el admin filtra por el
+  // chofer de la jornada. limit=all evita el tope de 100 por defecto.
+  // Si cualquier consulta falla, devuelve null y el cierre sigue sin
+  // aviso ni confirm (nunca bloquea).
+  async function cargarPendientesCierre(date, driverId, shiftId) {
     try {
       var extra = (user.role === 'admin' && driverId) ? '&driver_id=' + encodeURIComponent(driverId) : '';
-      var trips = await api('/api/trips?date=' + encodeURIComponent(date) + extra + '&limit=all');
-      var expenses = await api('/api/expenses?date=' + encodeURIComponent(date) + extra + '&limit=all');
+      var trips, expenses;
+      if (shiftId) {
+        trips = await api('/api/trips?shift_id=' + encodeURIComponent(shiftId) + extra + '&limit=all');
+        expenses = await api('/api/expenses?shift_id=' + encodeURIComponent(shiftId) + extra + '&limit=all');
+      } else {
+        trips = await api('/api/trips?date=' + encodeURIComponent(date) + extra + '&limit=all');
+        expenses = await api('/api/expenses?date=' + encodeURIComponent(date) + extra + '&limit=all');
+      }
       return filtrarPendientesCierre(trips, expenses);
     } catch (e) { return null; }
   }
@@ -612,7 +624,20 @@
     var effDate = clampDriverDate(inicioDate) || todayLocal();
     var closes = [];
     try { closes = await api('/api/day-close?date=' + encodeURIComponent(effDate)); } catch (e) { closes = []; }
+    // Turno abierto (de hoy o de anoche): si el chofer está en medio de
+    // un turno de noche que empezó ayer, el día que se está viendo es
+    // hoy y el cierre de ese turno es el que importa, no el "Sin
+    // actividad" de hoy.
+    var openClose = null;
+    try {
+      var openShift = await api('/api/shifts?open_only=1');
+      if (openShift) {
+        var oc = await api('/api/day-close?shift_id=' + encodeURIComponent(openShift.id));
+        if (oc.length) openClose = oc[0];
+      }
+    } catch (e) { openClose = null; }
     var mine = closes.length ? closes[0] : null;
+    if (openClose && effDate === todayLocal()) mine = openClose;
     var dayCard = '';
     if (!mine || (!mine.shift_taxi && !mine.trips_count && !mine.expenses)) {
       dayCard = '<div class="card"><h3>' + esc(effDate) + '</h3><p class="muted">Sin actividad ese día.</p>' +
@@ -631,15 +656,25 @@
         '<p>Gastos: ' + money(mine.expenses) + '</p>' +
         '<p class="money-line">' + handoverCashLine(mine, 'El dueño te debe') + '</p>' + methodsLine(mine) + creditLines(mine) + settlementLine(mine) + '</div>';
     }
+    // Un día puede tener más de un turno (se cierra la noche a la
+    // mañana y se vuelve a salir a la tarde): acá se muestra el primero
+    // y se avisa que hay más en Cierre del día.
+    if (closes.length > 1 && dayCard) {
+      dayCard = dayCard.replace(/<\/div>$/, '<p class="muted">Este día tiene ' + closes.length + ' turnos — acá se muestra el primero; los demás están en Cierre del día.</p></div>');
+    }
     // "Mi taxi hoy" siempre habla de hoy, aunque el chofer esté viendo un
     // día pasado con el selector de fecha: si ya se está viendo hoy se
     // reutiliza mine (sin llamada extra); si no, se pide day-close de
     // hoy. Si esa llamada falla, la tarjeta se omite (no se afirma que
     // "todavía no empezó el día" sobre un dato que no se pudo leer).
+    // Con un turno de noche abierto desde ayer, el taxi de hoy es ese
+    // turno, no el "todavía no empezaste el día".
     var miTaxiHoyCard = '';
     if (user.role === 'driver') {
       if (effDate === todayLocal()) {
-        miTaxiHoyCard = miTaxiHoyHtml(mine);
+        miTaxiHoyCard = miTaxiHoyHtml(openClose || mine);
+      } else if (openClose) {
+        miTaxiHoyCard = miTaxiHoyHtml(openClose);
       } else {
         try {
           var closesToday = await api('/api/day-close?date=' + encodeURIComponent(todayLocal()));
@@ -653,14 +688,24 @@
       var to14 = todayLocal();
       var trips14 = await api('/api/trips?from=' + encodeURIComponent(from14) + '&to=' + encodeURIComponent(to14));
       var exp14 = await api('/api/expenses?from=' + encodeURIComponent(from14) + '&to=' + encodeURIComponent(to14));
+      // Los viajes y gastos se agrupan por el día en que empezó su turno
+      // (un gasto de nafta a las 02:00 cuenta en el turno de noche del
+      // día anterior, igual que en el cierre).
+      var shiftDateById14 = {};
+      try {
+        var shifts14 = await api('/api/shifts');
+        shifts14.forEach(function (s) { shiftDateById14[s.id] = s.shift_date; });
+      } catch (e) { /* sin mapa, se agrupa por fecha del calendario */ }
       var byDate = {};
       trips14.forEach(function (t) {
-        byDate[t.trip_date] = byDate[t.trip_date] || { facturado: 0, gastos: 0 };
-        byDate[t.trip_date].facturado += Number(t.amount);
+        var d = t.shift_date || t.trip_date;
+        byDate[d] = byDate[d] || { facturado: 0, gastos: 0 };
+        byDate[d].facturado += Number(t.amount);
       });
       exp14.forEach(function (g) {
-        byDate[g.expense_date] = byDate[g.expense_date] || { facturado: 0, gastos: 0 };
-        byDate[g.expense_date].gastos += Number(g.amount);
+        var d = (g.shift_id !== null && g.shift_id !== undefined && shiftDateById14[g.shift_id]) ? shiftDateById14[g.shift_id] : g.expense_date;
+        byDate[d] = byDate[d] || { facturado: 0, gastos: 0 };
+        byDate[d].gastos += Number(g.amount);
       });
       var dates = Object.keys(byDate).sort().reverse();
       if (dates.length) {
@@ -764,8 +809,9 @@
       for (var i = 0; i < 7; i++) dates.push(daysAgoLocal(i));
       var all = await Promise.all(dates.map(function (dt) { return api('/api/day-close?date=' + encodeURIComponent(dt)).catch(function () { return []; }); }));
       all.forEach(function (closes) {
-        var mine = closes.find(function (c) { return String(c.driver_id) === String(driverId); });
-        if (mine && (mine.shift_entry_time || Number(mine.trips_count) > 0 || Number(mine.expenses) > 0)) recentCloses.push(mine);
+        closes.forEach(function (c) {
+          if (String(c.driver_id) === String(driverId) && (c.shift_entry_time || Number(c.trips_count) > 0 || Number(c.expenses) > 0)) recentCloses.push(c);
+        });
       });
     } catch (e) { recentCloses = []; }
 
@@ -889,8 +935,11 @@
   // campo NO se precarga (nunca se pisa lo que ya escribió).
   function relevoBanner(relevo) {
     if (!relevo || !relevo.driver_name) return '';
+    // Si el cierre del compañero no fue hoy (turno de noche que cerró de
+    // madrugada o ayer a la tarde), se muestra la fecha para no confundir.
+    var cuando = (relevo.exit_date && relevo.exit_date !== todayLocal()) ? ' (cierre del ' + esc(relevo.exit_date) + ')' : '';
     return '<p class="muted" id="relevo-banner">Relevo de ' + esc(relevo.driver_name) +
-      ' · El taxi quedó con ' + esc(relevo.exit_km) + ' km a las ' + esc(String(relevo.exit_time).slice(0, 5)) +
+      ' · El taxi quedó con ' + esc(relevo.exit_km) + ' km a las ' + esc(String(relevo.exit_time).slice(0, 5)) + cuando +
       '. Se precargaron hora y km de entrada; podés corregirlos.</p>';
   }
   function relevoPrefill(form, relevo, tocado) {
@@ -940,6 +989,18 @@
       var date = clampDriverDate(dateInput.value);
       if (date !== dateInput.value) dateInput.value = date;
       try {
+        // Turno abierto (de hoy o de anoche): manda sobre la fecha
+        // elegida. Un turno de noche que empezó ayer sigue abierto hoy
+        // de madrugada: se muestra acá para seguir cargando viajes y
+        // cerrarlo cuando termine, sin tener que abrir otro día.
+        if (user.role === 'driver') {
+          var openShift = null;
+          try { openShift = await api('/api/shifts?open_only=1'); } catch (e) { openShift = null; }
+          if (openShift) {
+            date = openShift.shift_date;
+            if (dateInput.value !== date) dateInput.value = date;
+          }
+        }
         var shifts = await api('/api/shifts?date=' + encodeURIComponent(date));
         var s = shifts && shifts[0] ? shifts[0] : null;
         if (!s) {
@@ -950,6 +1011,7 @@
             '<label>Hora de entrada <input name="entry_time" type="time" value="' + nowTimeLocal() + '" required></label>' +
             '<label>Km del auto <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
             '<button type="submit">Empezar día</button></form>' +
+            '<p class="error" id="km-entry-hint"></p>' +
             '<div id="relevo-box"></div>' +
             '<p class="muted" id="day-geo-status">Detectando ubicación…</p>' +
             '<p class="muted">Al entrar, cargá la hora y el kilometraje con el que agarrás el auto.</p>';
@@ -967,8 +1029,24 @@
           // Si el chofer escribe hora o km mientras responde la búsqueda
           // de relevo, ese campo no se precarga: nunca se pisa lo tipeado.
           var relevoTocado = { time: false, km: false };
+          // Aviso en vivo si el km tipeado queda más de 3 km por encima
+          // del último cierre del taxi (mismo umbral que la alerta y que
+          // el bloqueo del backend): frena el error de tipeo antes de
+          // enviar. relevoActual guarda el último relevo buscado.
+          var relevoActual = null;
+          var kmHintEl = document.getElementById('km-entry-hint');
+          function actualizarAvisoKm() {
+            if (!kmHintEl || !startForm) return;
+            var v = Number(startForm.entry_km.value);
+            if (relevoActual && relevoActual.exit_km !== null && relevoActual.exit_km !== undefined && isFinite(v) && v > Number(relevoActual.exit_km) + 3) {
+              var over = Math.round((v - Number(relevoActual.exit_km)) * 100) / 100;
+              kmHintEl.textContent = '⚠ El último cierre de este taxi fue ' + relevoActual.exit_km + ' km. Con ' + startForm.entry_km.value + ' km quedás ' + over + ' km arriba y no se va a poder abrir así: si el km es correcto, pedile al dueño que corrija el cierre anterior.';
+            } else {
+              kmHintEl.textContent = '';
+            }
+          }
           startForm.entry_time.addEventListener('input', function () { relevoTocado.time = true; });
-          startForm.entry_km.addEventListener('input', function () { relevoTocado.km = true; });
+          startForm.entry_km.addEventListener('input', function () { relevoTocado.km = true; actualizarAvisoKm(); });
           async function aplicarRelevo() {
             if (!startForm || !relevoBox) return;
             var seq = ++relevoSeq;
@@ -980,6 +1058,8 @@
             } else {
               relevoBox.innerHTML = '';
             }
+            relevoActual = r || null;
+            actualizarAvisoKm();
           }
           startForm.taxi_id.addEventListener('change', aplicarRelevo);
           if (startForm.taxi_id.value) aplicarRelevo();
@@ -1006,7 +1086,8 @@
               if (open.length) {
                 var taxiName = (taxis.find(function (t) { return String(t.id) === String(f.taxi_id.value); }) || {}).identifier || 'elegido';
                 var names = open.map(function (o) { return o.driver_name; }).join(', ');
-                if (!confirm('El taxi ' + taxiName + ' ya tiene jornada abierta hoy por ' + names + '. ¿Igual querés empezar tu día en este taxi?')) return;
+                var desde = (open[0] && open[0].shift_date) ? ' (desde el ' + open[0].shift_date + ')' : '';
+                if (!confirm('El taxi ' + taxiName + ' ya tiene jornada abierta por ' + names + desde + '. ¿Igual querés empezar tu día en este taxi?')) return;
               }
             } catch (e) { /* sin aviso, se sigue igual */ }
             var body = {
@@ -1038,14 +1119,16 @@
               '<button type="button" data-goto="expenses">Cargar gasto</button>' +
               '<button type="button" id="day-goto-close-btn">Cerrar día</button></div>'
             : '';
-          stateEl.innerHTML = '<div class="steps"><span class="step done">1 · Empezar</span><span class="step active">2 · Cerrar</span><span class="step">3 · Listo</span></div>' + '<p>Taxi del día: <strong>' + esc(s.taxi_identifier || '—') + '</strong> · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Ver entrada en mapa') + '</p>' + quickActions +
+          stateEl.innerHTML = '<div class="steps"><span class="step done">1 · Empezar</span><span class="step active">2 · Cerrar</span><span class="step">3 · Listo</span></div>' + '<p><strong>Turno abierto' + (s.shift_date === todayLocal() ? ' de hoy' : ' desde el ' + esc(s.shift_date)) + '.</strong> Taxi del día: <strong>' + esc(s.taxi_identifier || '—') + '</strong> · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Ver entrada en mapa') + '</p>' + quickActions +
             '<form id="day-close-form" class="row">' +
+            '<label>Fecha de cierre <input name="exit_date" type="date" value="' + todayLocal() + '" min="' + esc(s.shift_date) + '" required></label>' +
             '<label>Hora de cierre <input name="exit_time" type="time" value="' + nowTimeLocal() + '" required></label>' +
             '<label>Km con el que queda el auto <input name="exit_km" type="number" step="0.01" min="0" required></label>' +
             '<label>Aclaraciones (opcional) <textarea name="note" rows="2" placeholder="Ej: llevé el auto a service, fui a hacer mandados"></textarea></label>' +
             '<button type="submit">Cerrar el día</button></form>' +
             '<p class="muted" id="day-close-checklist"></p>' +
             '<p class="muted" id="entrega-linea"></p>' +
+            '<div id="day-shift-trips"></div>' +
             '<p class="muted" id="day-geo-status">Detectando ubicación…</p>';
           // Línea en vivo de la entrega: se actualiza mientras se escribe
           // el km de cierre; no bloquea, no pide confirm extra, no toca
@@ -1059,10 +1142,23 @@
             });
           })();
           var checklistPendientes = null;
-          cargarPendientesCierre(date, s.driver_id).then(function (p) {
+          cargarPendientesCierre(date, s.driver_id, s.id).then(function (p) {
             checklistPendientes = p;
             mostrarAvisoCierre(p);
           });
+          // Viajes de este turno (incluidos los de la madrugada): solo el
+          // conteo y el atajo a Mis viajes, donde se editan.
+          (function () {
+            api('/api/trips?shift_id=' + encodeURIComponent(s.id) + '&limit=all').then(function (ts) {
+              var el = document.getElementById('day-shift-trips');
+              if (!el) return;
+              el.innerHTML = ts.length
+                ? '<p class="muted">Viajes de este turno: ' + ts.length + ' · <button type="button" id="day-shift-trips-btn">Ver y editar en Mis viajes</button></p>'
+                : '<p class="muted">Todavía no hay viajes en este turno.</p>';
+              var b = document.getElementById('day-shift-trips-btn');
+              if (b) b.addEventListener('click', function () { currentTab = 'trips'; buildTabs(); });
+            }).catch(function () { /* sin conteo, el cierre sigue igual */ });
+          })();
           captureLocation(function (geo) {
             exitGeo = geo;
             var st = document.getElementById('day-geo-status');
@@ -1074,10 +1170,12 @@
             if (!kmCierreValido(s.entry_km, f.exit_km.value)) return;
             if (checklistPendientes && checklistPendientes.total > 0 && !confirm(textoConfirmCierre(checklistPendientes))) return;
             var body = {
+              id: s.id,
               shift_date: date,
               taxi_id: s.taxi_id,
               entry_time: s.entry_time,
               entry_km: s.entry_km,
+              exit_date: f.exit_date.value,
               exit_time: f.exit_time.value,
               exit_km: f.exit_km.value,
               note: f.note.value,
@@ -1105,18 +1203,25 @@
             }
           });
         } else {
-          // Día cerrado: resumen + cierre.
-          var closes = await api('/api/day-close?date=' + encodeURIComponent(date));
-          var kmLine = (s.km_driven !== null && s.km_driven !== undefined)
-            ? ' · Km recorridos: <strong>' + esc(s.km_driven) + ' km</strong>' : '';
-          var exitLine = (s.exit_time ? ' · Cierre: ' + esc(s.exit_time) : '') +
-            (s.exit_km !== null ? ' · ' + esc(s.exit_km) + ' km' : '');
-          stateEl.innerHTML = '<div class="steps"><span class="step done">1 · Empezar</span><span class="step done">2 · Cerrar</span><span class="step active">3 · Listo</span></div>' + '<p><strong>Día cerrado.</strong> Taxi: ' + esc(s.taxi_identifier || '—') +
-            ' · Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km' + mapLink(s.entry_lat, s.entry_lng, 'Entrada en mapa') + exitLine + mapLink(s.exit_lat, s.exit_lng, 'Salida en mapa') + kmLine + '</p>' +
-            (closes.length ? closeCardsHtml(closes) : '') +
-            '<button type="button" id="day-edit-btn">Editar día</button>';
-          document.getElementById('day-edit-btn').addEventListener('click', function () {
-            showEditForm(s);
+          // Día cerrado: resumen + cierre. Un día puede tener más de un
+          // turno (se cierra la noche a la mañana y se vuelve a salir a
+          // la tarde): cada turno muestra su cierre y su botón Editar.
+          var closedBlocks = [];
+          for (var ci = 0; ci < shifts.length; ci++) {
+            var sh = shifts[ci];
+            var shCloses = [];
+            try { shCloses = await api('/api/day-close?shift_id=' + encodeURIComponent(sh.id)); } catch (e) { shCloses = []; }
+            closedBlocks.push((shCloses.length ? closeCardsHtml(shCloses) : '<p class="muted">Sin datos para este turno.</p>') +
+              '<button type="button" data-edit-shift="' + sh.id + '">Editar día</button>');
+          }
+          stateEl.innerHTML = '<div class="steps"><span class="step done">1 · Empezar</span><span class="step done">2 · Cerrar</span><span class="step active">3 · Listo</span></div>' +
+            '<p><strong>Día cerrado.</strong>' + (shifts.length > 1 ? ' ' + shifts.length + ' turnos este día.' : '') + '</p>' +
+            closedBlocks.join('');
+          stateEl.querySelectorAll('[data-edit-shift]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+              var sh = shifts.find(function (x) { return String(x.id) === btn.getAttribute('data-edit-shift'); });
+              if (sh) showEditForm(sh);
+            });
           });
         }
       } catch (e) { stateEl.innerHTML = '<p class="error">' + esc(e.message) + '</p>'; }
@@ -1126,6 +1231,7 @@
       stateEl.innerHTML = '<form id="day-edit-form" class="row">' + taxiSelect(s.taxi_id) +
         '<label>Hora de entrada <input name="entry_time" type="time" value="' + esc(s.entry_time || '') + '" required></label>' +
         '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" value="' + esc(s.entry_km) + '" required></label>' +
+        '<label>Fecha de cierre <input name="exit_date" type="date" value="' + esc(s.exit_date || s.shift_date) + '" min="' + esc(s.shift_date) + '"></label>' +
         '<label>Hora de cierre <input name="exit_time" type="time" value="' + esc(s.exit_time || '') + '"></label>' +
         '<label>Km de cierre <input name="exit_km" type="number" step="0.01" min="0" value="' + (s.exit_km !== null ? esc(s.exit_km) : '') + '"></label>' +
         '<label>Aclaraciones (opcional) <textarea name="note" rows="2" placeholder="Ej: llevé el auto a service, fui a hacer mandados">' + esc(s.note || '') + '</textarea></label>' +
@@ -1136,10 +1242,12 @@
         if (!kmCierreValido(f.entry_km.value, f.exit_km.value)) return;
         try {
           await api('/api/shifts', 'POST', {
-            shift_date: dateInput.value,
+            id: s.id,
+            shift_date: s.shift_date,
             taxi_id: f.taxi_id.value,
             entry_time: f.entry_time.value,
             entry_km: f.entry_km.value,
+            exit_date: f.exit_date.value || null,
             exit_time: f.exit_time.value || null,
             exit_km: f.exit_km.value === '' ? null : f.exit_km.value,
             note: f.note.value,
@@ -1183,8 +1291,11 @@
       var shiftLine = t.entry_time
         ? '<p>Entrada: ' + esc(t.entry_time) + ' · ' + esc(t.entry_km) + ' km — Salida: ' + esc(t.exit_time) + ' · ' + esc(t.exit_km) + ' km</p>'
         : '';
+      // Si el viaje es de la madrugada de un turno de noche, se muestra a
+      // qué turno pertenece (su fecha es el día siguiente al inicio).
+      var turnoLine = (t.shift_date && t.shift_date !== t.trip_date) ? ' · Turno del ' + esc(t.shift_date) : '';
       return '<div class="card"><p><strong>' + esc(t.trip_date) + '</strong> · ' + esc(t.driver_name || user.name) +
-        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + ' · Turno: ' + (t.shift_type === 'night' ? 'Noche' : 'Día') + mapLink(t.trip_lat, t.trip_lng, 'Mapa') + '</p>' + shiftLine +
+        (t.taxi_identifier ? ' · ' + esc(t.taxi_identifier) : '') + ' · Turno: ' + (t.shift_type === 'night' ? 'Noche' : 'Día') + turnoLine + mapLink(t.trip_lat, t.trip_lng, 'Mapa') + '</p>' + shiftLine +
         '<p>Monto: ' + money(t.amount) + ' · %: ' + esc(t.pct_snapshot) + '% · Te quedás: ' + money(t.driver_keeps) + ' · Dueño: ' + money(t.owner_share) + (t.payment_method_name ? ' · Pago: ' + esc(t.payment_method_name) : '') + (t.destination ? ' · Destino: ' + esc(t.destination) : '') + '</p>' +
         '<button type="button" class="secondary small" data-edit-trip="' + t.id + '">Editar</button> ' +
         '<button type="button" class="danger small" data-del-trip="' + t.id + '">Borrar</button></div>';
@@ -1362,14 +1473,17 @@
     var tripGeo = null;
     var methods = [];
     try { methods = await api('/api/trips?methods=1'); } catch (e) { methods = []; }
-    // Chofer sin día empezado hoy: no se muestra el formulario y se lo
+    // Chofer sin turno abierto: no se muestra el formulario y se lo
     // manda a empezar el día. Si la consulta falla, se muestra el
-    // formulario igual y el backend rechaza el viaje si no hay jornada.
+    // formulario igual y el backend rechaza el viaje si no hay turno.
     // El admin siempre ve el formulario (carga y corrige cualquier día).
+    // El turno abierto puede haber empezado ayer (turno de noche): los
+    // viajes de la madrugada se atan a ese turno.
     if (user.role === 'driver') {
-      var todayShifts = null;
-      try { todayShifts = await api('/api/shifts?date=' + encodeURIComponent(todayLocal())); } catch (e) { todayShifts = null; }
-      if (todayShifts !== null && !todayShifts.length) {
+      var openShift = undefined;
+      var openShiftNote = '';
+      try { openShift = await api('/api/shifts?open_only=1'); } catch (e) { openShift = undefined; }
+      if (openShift === null) {
         contentEl.innerHTML = '<h2>Nuevo viaje</h2><p>Para cargar viajes primero tenés que empezar el día.</p><p><button type="button" data-goto="day">Empezar el día</button></p>';
         contentEl.querySelectorAll('[data-goto]').forEach(function (btn) {
           btn.addEventListener('click', function () {
@@ -1379,8 +1493,11 @@
         });
         return;
       }
+      if (openShift) openShiftNote = '<p class="muted">Se suma a tu turno abierto del ' + esc(openShift.shift_date) + (openShift.taxi_identifier ? ' · ' + esc(openShift.taxi_identifier) : '') + '.</p>';
+      contentEl.innerHTML = tripFormHtml(methods) + openShiftNote;
+    } else {
+      contentEl.innerHTML = tripFormHtml(methods);
     }
-    contentEl.innerHTML = tripFormHtml(methods);
     captureLocation(function (geo) {
       tripGeo = geo;
       var st = document.getElementById('trip-geo-status');
@@ -1646,10 +1763,10 @@
     return String(name || '').trim().toLowerCase() === 'efectivo';
   }
 
-  // Función de raw por (chofer, fecha) de la última carga de balances.
-  // Los viajes y gastos no cambian durante un saldado (solo cambian las
-  // marcas de liquidación, que se releen en cada iteración), así que la
-  // clausura sigue siendo válida dentro del bucle de saldar.
+  // Función de raw por turno de la última carga de balances. Los viajes
+  // y gastos no cambian durante un saldado (solo cambian las marcas de
+  // liquidación, que se releen en cada iteración), así que la clausura
+  // sigue siendo válida dentro del bucle de saldar.
   var pendingBalanceRawFor = null;
 
   // Carga los balances pendientes de todos los choferes. Devuelve filas
@@ -1659,27 +1776,43 @@
     var shifts = await api('/api/shifts');
     var trips = await api('/api/trips?limit=all');
     var expenses = await api('/api/expenses?limit=all');
+    // Viajes y gastos por turno (shift_id); los viejos sin turno se
+    // cuentan por fecha, solo en el primer turno de ese día (antes de la
+    // v11 había un solo turno por día, así que no se duplican).
+    var firstShiftIdByDate = {};
+    shifts.forEach(function (s) {
+      var key = s.driver_id + '|' + s.shift_date;
+      if (firstShiftIdByDate[key] === undefined) firstShiftIdByDate[key] = s.id;
+    });
     var tripAgg = {};
     trips.forEach(function (t) {
-      var key = t.driver_id + '|' + t.trip_date;
+      var key = (t.shift_id !== null && t.shift_id !== undefined)
+        ? 's|' + t.shift_id
+        : 'd|' + t.driver_id + '|' + t.trip_date;
       var a = tripAgg[key] || (tripAgg[key] = { cash: 0, keeps: 0 });
       if (isCashMethod(t.payment_method_name)) a.cash += Number(t.amount) || 0;
       a.keeps += (Number(t.amount) || 0) * (Number(t.pct_snapshot) || 0) / 100;
     });
     var expAgg = {};
     expenses.forEach(function (g) {
-      var key = g.driver_id + '|' + g.expense_date;
+      var key = (g.shift_id !== null && g.shift_id !== undefined)
+        ? 's|' + g.shift_id
+        : 'd|' + g.driver_id + '|' + g.expense_date;
       expAgg[key] = (expAgg[key] || 0) + (Number(g.amount) || 0);
     });
-    function rawFor(driverId, date) {
-      var key = driverId + '|' + date;
-      var ta = tripAgg[key];
+    function rawForShift(s) {
+      var ta = tripAgg['s|' + s.id];
       var cash = ta ? roundMoney(ta.cash) : 0;
       var keeps = ta ? roundMoney(ta.keeps) : 0;
-      var exp = expAgg[key] !== undefined ? roundMoney(expAgg[key]) : 0;
+      var exp = roundMoney(expAgg['s|' + s.id] || 0);
+      if (firstShiftIdByDate[s.driver_id + '|' + s.shift_date] === s.id) {
+        var lt = tripAgg['d|' + s.driver_id + '|' + s.shift_date];
+        if (lt) { cash = roundMoney(cash + lt.cash); keeps = roundMoney(keeps + lt.keeps); }
+        exp = roundMoney(exp + (expAgg['d|' + s.driver_id + '|' + s.shift_date] || 0));
+      }
       return roundMoney(cash - keeps - exp);
     }
-    pendingBalanceRawFor = rawFor;
+    pendingBalanceRawFor = rawForShift;
     var driverInfo = {};
     (drivers || []).forEach(function (d) {
       driverInfo[d.id] = { name: d.name, active: d.active !== false };
@@ -1691,7 +1824,7 @@
       var info = driverInfo[id] || { name: s.driver_name || 'Chofer', active: true };
       var entry = perDriver[id] || (perDriver[id] = { driver_id: id, name: info.name, active: info.active, balanceExact: 0, pendingCount: 0 });
       if ((s.settlement || 'pendiente') === 'pendiente') {
-        entry.balanceExact += rawFor(id, s.shift_date);
+        entry.balanceExact += rawForShift(s);
         entry.pendingCount += 1;
       }
     });
@@ -1726,14 +1859,18 @@
     return '<h3>Balances pendientes</h3><p class="muted">Barras en comparación entre choferes, no una meta.</p>' + cards;
   }
 
-  // Nets de una secuencia de días cerrados, con la misma regla que
-  // applyCreditToDays en api/day-close.js: el saldo a favor se descuenta
-  // de los días positivos siguientes; un día "pagado" con raw negativo NO
-  // genera saldo. days: [{date, raw, settlement}] (se ordena por fecha).
-  function creditNets(days) {
+  // Nets de una secuencia de turnos cerrados, con la misma regla que
+  // applyCreditToShifts en api/day-close.js: el saldo a favor se descuenta
+  // de los turnos positivos siguientes; un turno "pagado" con raw negativo
+  // NO genera saldo. shifts: [{id, date, raw, settlement}] (se ordena por
+  // fecha de inicio y luego por id: un día puede tener más de un turno).
+  function creditNets(shifts) {
     var nets = {};
     var credit = 0;
-    days.slice().sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); }).forEach(function (d) {
+    shifts.slice().sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return (Number(a.id) || 0) - (Number(b.id) || 0);
+    }).forEach(function (d) {
       var applied = 0;
       if (d.raw > 0 && credit > 0) {
         applied = roundMoney(Math.min(credit, d.raw));
@@ -1741,7 +1878,7 @@
       } else if (d.raw < 0) {
         if (d.settlement !== 'pagado') credit = roundMoney(credit - d.raw);
       }
-      nets[d.date] = roundMoney(d.raw - applied);
+      nets[d.id] = roundMoney(d.raw - applied);
     });
     return nets;
   }
@@ -1778,18 +1915,22 @@
         var shifts = await api('/api/shifts?driver_id=' + encodeURIComponent(driverId));
         var days = shifts.filter(function (s) { return s.exit_km !== null && s.exit_km !== undefined; }).map(function (s) {
           return {
+            id: s.id,
             date: s.shift_date,
-            raw: pendingBalanceRawFor ? pendingBalanceRawFor(driverId, s.shift_date) : 0,
+            raw: pendingBalanceRawFor ? pendingBalanceRawFor(s) : 0,
             settlement: s.settlement || 'pendiente',
           };
         });
-        var pendingDays = days.filter(function (d) { return d.settlement === 'pendiente'; }).sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+        var pendingDays = days.filter(function (d) { return d.settlement === 'pendiente'; }).sort(function (a, b) {
+          if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+          return (Number(a.id) || 0) - (Number(b.id) || 0);
+        });
         if (!pendingDays.length) break;
         var nets = creditNets(days);
         var target = pendingDays[0];
-        var net = nets[target.date];
+        var net = nets[target.id];
         var state = net > 0 ? 'recibido' : (net < 0 ? 'pagado' : 'recibido');
-        await api('/api/shifts', 'POST', { action: 'settle', driver_id: driverId, shift_date: target.date, settlement: state });
+        await api('/api/shifts', 'POST', { action: 'settle', shift_id: target.id, settlement: state });
         done += 1;
       }
       var check = await api('/api/shifts?driver_id=' + encodeURIComponent(driverId));
@@ -1858,9 +1999,10 @@
       var btn = (pending > 0 && balancesOk)
         ? '<button type="button" data-settle-balance="' + d.id + '" data-driver-name="' + esc(d.name) + '" data-balance="' + balance + '" data-pending="' + pending + '" data-verb="Liquidar">Liquidar</button>'
         : '';
+      var detailBtn = '<button type="button" data-liquidacion-detalle="' + d.id + '" data-driver-name="' + esc(d.name) + '" data-balance="' + balance + '">Ver detalle</button>';
       return '<div class="card"><p><strong>' + esc(d.name) + '</strong>' + (d.active ? '' : ' (inactivo)') + '</p>' +
         '<p class="big-number">' + money(Math.abs(balance)) + '</p>' +
-        '<p>' + direction + '</p><p class="muted">' + countText + '</p>' + lastText + btn + '</div>';
+        '<p>' + direction + '</p><p class="muted">' + countText + '</p>' + lastText + btn + detailBtn + '</div>';
     }).join('');
     contentEl.innerHTML = '<h2>Liquidación</h2>' +
       '<p class="muted">Cada chofer tiene un solo saldo acumulado: los días en que te debe suman y los días en que vos le debés restan. Cuando liquidás, el saldo vuelve a 0 y los días futuros arrancan limpios. Solo se liquida acá, no por día ni por viaje.</p>' +
@@ -1868,6 +2010,58 @@
       cards;
     contentEl.querySelectorAll('[data-settle-balance]').forEach(function (btn) {
       btn.addEventListener('click', function () { settleBalance(btn, renderLiquidacion); });
+    });
+    contentEl.querySelectorAll('[data-liquidacion-detalle]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        renderLiquidacionDetalle(Number(btn.getAttribute('data-liquidacion-detalle')), btn.getAttribute('data-driver-name') || 'Chofer', Number(btn.getAttribute('data-balance')) || 0);
+      });
+    });
+  }
+
+  // ---------- Detalle de liquidación de un chofer (solo admin) ----------
+  // Tocar "Ver detalle" en la tarjeta de Liquidación abre los cierres
+  // pendientes que forman el saldo: fecha, taxi, viajes, recaudado, lo
+  // que se queda el chofer, lo que entrega en efectivo y km recorridos.
+  // Desde acá también se liquida (mismo botón y misma confirmación); al
+  // liquidar se vuelve a la lista, ya con el saldo en 0.
+  async function renderLiquidacionDetalle(driverId, driverName, balance) {
+    contentEl.innerHTML = '<h2>Liquidación · ' + esc(driverName) + '</h2><p class="muted">Cargando…</p>';
+    var shifts = [];
+    try { shifts = await api('/api/shifts?driver_id=' + encodeURIComponent(driverId)); } catch (e) { shifts = []; }
+    var pending = shifts.filter(function (s) { return s.exit_km !== null && s.exit_km !== undefined && (s.settlement || 'pendiente') === 'pendiente'; })
+      .sort(function (a, b) { if (a.shift_date !== b.shift_date) return a.shift_date < b.shift_date ? -1 : 1; return a.id - b.id; });
+    var rows = [];
+    try {
+      rows = await Promise.all(pending.map(function (s) {
+        return api('/api/day-close?shift_id=' + encodeURIComponent(s.id)).then(function (r) { return (r && r[0]) ? r[0] : null; }).catch(function () { return null; });
+      }));
+    } catch (e) { rows = pending.map(function () { return null; }); }
+    var direction = balance > 0 ? 'El chofer te debe ' + money(balance)
+      : (balance < 0 ? 'Vos le debés ' + money(-balance) : 'Sin saldo pendiente');
+    var items = pending.map(function (s, i) {
+      var c = rows[i];
+      var dateLabel = esc(s.shift_date) + ((s.exit_date && s.exit_date !== s.shift_date) ? ' → ' + esc(s.exit_date) : '');
+      var head = '<p><strong>' + dateLabel + '</strong>' + (s.taxi_identifier ? ' · ' + esc(s.taxi_identifier) : '') + '</p>';
+      if (!c) {
+        return '<div class="card">' + head + '<p class="muted">Entrada: ' + esc(s.entry_time) + ' · ' + esc(s.entry_km) + ' km — Salida: ' + esc(s.exit_time) + ' · ' + esc(s.exit_km) + ' km</p></div>';
+      }
+      return '<div class="card">' + head +
+        '<p>Viajes: ' + esc(c.trips_count) + ' · Total recaudado: <strong>' + money(c.total_collected) + '</strong></p>' +
+        '<p>Se queda el chofer: ' + money(c.driver_keeps) + ' · Entrega en efectivo: <strong>' + money(c.handover_cash) + '</strong></p>' +
+        (c.km_driven !== null && c.km_driven !== undefined ? '<p class="muted">Km recorridos: ' + esc(c.km_driven) + ' km</p>' : '') +
+        '</div>';
+    }).join('');
+    var btn = (pending.length > 0)
+      ? '<button type="button" data-settle-balance="' + driverId + '" data-driver-name="' + esc(driverName) + '" data-balance="' + balance + '" data-pending="' + pending.length + '" data-verb="Liquidar">Liquidar</button>'
+      : '';
+    contentEl.innerHTML = '<h2>Liquidación · ' + esc(driverName) + '</h2>' +
+      '<p><button type="button" id="liq-detalle-volver">← Volver a Liquidación</button></p>' +
+      '<p class="big-number">' + money(Math.abs(balance)) + '</p><p>' + direction + '</p>' +
+      '<p class="muted">' + (pending.length === 0 ? 'Sin cierres pendientes.' : (pending.length === 1 ? '1 cierre pendiente:' : pending.length + ' cierres pendientes:')) + '</p>' +
+      items + btn;
+    document.getElementById('liq-detalle-volver').addEventListener('click', function () { renderLiquidacion(); });
+    contentEl.querySelectorAll('[data-settle-balance]').forEach(function (b) {
+      b.addEventListener('click', function () { settleBalance(b, renderLiquidacion); });
     });
   }
 
@@ -1953,8 +2147,14 @@
       var expByDate = {};
       try {
         var expRange = await api('/api/expenses?from=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(today));
+        var shiftDateByIdR = {};
+        try {
+          var shiftsR = await api('/api/shifts');
+          shiftsR.forEach(function (s) { shiftDateByIdR[s.id] = s.shift_date; });
+        } catch (e2) { /* sin mapa, se agrupa por fecha del calendario */ }
         expRange.forEach(function (g) {
-          expByDate[g.expense_date] = (expByDate[g.expense_date] || 0) + Number(g.amount);
+          var d = (g.shift_id !== null && g.shift_id !== undefined && shiftDateByIdR[g.shift_id]) ? shiftDateByIdR[g.shift_id] : g.expense_date;
+          expByDate[d] = (expByDate[d] || 0) + Number(g.amount);
         });
       } catch (e) { /* sin gastos para el gráfico */ }
       var chartDays = rep.per_day.slice(-14);
@@ -2516,13 +2716,16 @@
 
   function closeCardsHtml(closes, showKmAlert) {
     return closes.map(function (c) {
+      // Un turno de noche muestra su fecha de inicio y de cierre
+      // (6/11 → 7/11); un turno normal, solo su día.
+      var dateLabel = esc(c.date) + ((c.exit_date && c.exit_date !== c.date) ? ' → ' + esc(c.exit_date) : '');
       var shiftLine = c.shift_taxi
         ? '<p>Taxi del día: ' + esc(c.shift_taxi) +
           (c.shift_entry_time ? ' · Entrada: ' + esc(c.shift_entry_time) + ' · ' + esc(c.shift_entry_km) + ' km' : '') +
-          (c.shift_exit_time ? ' · Salida: ' + esc(c.shift_exit_time) + ' · ' + esc(c.shift_exit_km) + ' km' : '') + '</p>' +
+          (c.shift_exit_time ? ' · Salida: ' + ((c.exit_date && c.exit_date !== c.date) ? esc(c.exit_date) + ' ' : '') + esc(c.shift_exit_time) + ' · ' + esc(c.shift_exit_km) + ' km' : '') + '</p>' +
           (c.km_driven !== null && c.km_driven !== undefined ? '<p>Km recorridos: ' + esc(c.km_driven) + ' km</p>' : '')
         : '<p class="muted">Sin jornada cargada para ese día.</p>';
-      return '<div class="card"><h3>' + esc(c.driver_name) + ' · ' + esc(c.date) + '</h3>' +
+      return '<div class="card"><h3>' + esc(c.driver_name) + ' · ' + dateLabel + '</h3>' +
         '<p>Viajes: ' + esc(c.trips_count) + '</p>' + shiftLine +
         (showKmAlert && c.km_alert ? '<p class="error">⚠ Alerta de km: este taxi abrió el día ' + esc(c.km_over) + ' km por encima de su último cierre (' + esc(c.prev_exit_km) + ' km).</p>' : '') +
         '<p>Total recaudado</p><p class="big-number">' + money(c.total_collected) + '</p>' +
@@ -2575,13 +2778,15 @@
       '<h3>Cargar o corregir jornada</h3><form id="shift-form" class="row">' +
       '<label>Chofer <select name="driver_id">' + driverOptions + '</select></label>' +
       '<label>Fecha <input name="shift_date" type="date" value="' + todayLocal() + '" required></label>' +
+      '<label>Turno <select name="shift_id"><option value="">Nueva jornada</option></select></label>' +
       '<label>Taxi del día <select name="taxi_id" required>' + taxiOptions + '</select></label>' +
       '<label>Hora de entrada <input name="entry_time" type="time" required></label>' +
       '<label>Km de entrada <input name="entry_km" type="number" step="0.01" min="0" required></label>' +
+      '<label>Fecha de cierre <input name="exit_date" type="date"></label>' +
       '<label>Hora de cierre <input name="exit_time" type="time"></label>' +
       '<label>Km de cierre <input name="exit_km" type="number" step="0.01" min="0"></label>' +
       '<button type="submit">Guardar jornada</button></form>' +
-      '<p class="muted">Si un chofer olvidó empezar o cerrar el día, cargalo acá. Guardar reemplaza la jornada de ese chofer y fecha.</p>';
+      '<p class="muted">Si un chofer olvidó empezar o cerrar el día, cargalo acá. Para corregir un turno que ya existe, elegí el chofer y la fecha y después el turno en el desplegable (se precargan sus datos); si no elegís ninguno, se crea un turno nuevo para ese día.</p>';
     var form = document.getElementById('close-form');
     var result = document.getElementById('close-result');
     var pendingOnlyBox = document.getElementById('close-pending-only');
@@ -2604,22 +2809,55 @@
     form.addEventListener('submit', function (ev) { ev.preventDefault(); load(); });
     pendingOnlyBox.addEventListener('change', renderCloses);
     var shiftForm = document.getElementById('shift-form');
+    // Desplegable de turnos existentes para corregir: al cambiar chofer o
+    // fecha se listan los turnos de ese día (un día puede tener más de
+    // uno); al elegir uno se precargan sus datos en el formulario.
+    var shiftOptionsCache = [];
+    async function refreshShiftOptions() {
+      var sel = shiftForm.shift_id;
+      if (!sel) return;
+      var keep = sel.value;
+      try {
+        var list = await api('/api/shifts?driver_id=' + encodeURIComponent(shiftForm.driver_id.value) + '&date=' + encodeURIComponent(shiftForm.shift_date.value));
+        shiftOptionsCache = list || [];
+        sel.innerHTML = '<option value="">Nueva jornada</option>' + shiftOptionsCache.map(function (s, i) {
+          return '<option value="' + s.id + '">Turno ' + (i + 1) + ': ' + esc(s.taxi_identifier || '') + ' · ' + esc(String(s.entry_time).slice(0, 5)) + '–' + (s.exit_time ? esc(String(s.exit_time).slice(0, 5)) : 'abierto') + '</option>';
+        }).join('');
+        sel.value = keep;
+      } catch (e) { /* sin lista, igual se puede crear una nueva */ }
+    }
+    shiftForm.driver_id.addEventListener('change', refreshShiftOptions);
+    shiftForm.shift_date.addEventListener('change', refreshShiftOptions);
+    shiftForm.shift_id.addEventListener('change', function () {
+      var s = shiftOptionsCache.find(function (x) { return String(x.id) === shiftForm.shift_id.value; });
+      if (!s) return;
+      shiftForm.taxi_id.value = s.taxi_id;
+      shiftForm.entry_time.value = String(s.entry_time || '').slice(0, 5);
+      shiftForm.entry_km.value = s.entry_km;
+      shiftForm.exit_date.value = s.exit_date || s.shift_date;
+      shiftForm.exit_time.value = s.exit_time ? String(s.exit_time).slice(0, 5) : '';
+      shiftForm.exit_km.value = (s.exit_km !== null && s.exit_km !== undefined) ? s.exit_km : '';
+    });
+    refreshShiftOptions();
     shiftForm.addEventListener('submit', async function (ev) {
       ev.preventDefault();
       if (!shiftForm.taxi_id.value) { showMessage('Elegí el taxi del día.', 'error'); return; }
       if (!kmCierreValido(shiftForm.entry_km.value, shiftForm.exit_km.value)) return;
       try {
         await api('/api/shifts', 'POST', {
+          id: shiftForm.shift_id.value ? Number(shiftForm.shift_id.value) : undefined,
           driver_id: shiftForm.driver_id.value,
           shift_date: shiftForm.shift_date.value,
           taxi_id: shiftForm.taxi_id.value,
           entry_time: shiftForm.entry_time.value,
           entry_km: shiftForm.entry_km.value,
+          exit_date: shiftForm.exit_date.value || null,
           exit_time: shiftForm.exit_time.value || null,
           exit_km: shiftForm.exit_km.value === '' ? null : shiftForm.exit_km.value,
         });
         showMessage('Jornada guardada.', 'ok');
         load();
+        refreshShiftOptions();
       } catch (e) { showMessage(e.message, 'error'); }
     });
     load();

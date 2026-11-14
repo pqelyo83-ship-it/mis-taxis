@@ -1,14 +1,22 @@
-// /api/shifts — jornada del día por chofer.
-// Un registro por chofer y día: taxi del día, hora y km de entrada,
-// hora y km de salida (la salida se completa al terminar el día).
-// GET: chofer ve sus jornadas; admin ve todas (?driver_id=, ?date=).
-// POST: crea o actualiza la jornada (un registro por chofer y día).
-// El chofer solo maneja sus propias jornadas; el admin puede cargar la de cualquier chofer.
+// /api/shifts — turnos (jornadas) por chofer.
+// Un turno es una sesión de trabajo: empieza un día y puede cerrar al
+// otro (turno de noche). Por eso la fecha de inicio vive en shift_date
+// y la fecha de cierre en exit_date (migración v11): un turno que
+// empieza el 6/11 a las 22:00 y cierra el 7/11 a las 04:00 es UN solo
+// turno, no dos días. Los viajes y gastos se atan al turno abierto
+// (trips.shift_id / expenses.shift_id), no a la fecha del calendario.
+// Un chofer puede tener varios turnos empezando el mismo día (por
+// ejemplo, cierra la noche a la mañana y vuelve a salir a la tarde),
+// pero NUNCA dos turnos abiertos a la vez (índice parcial v11 +
+// chequeo acá). GET: chofer ve sus turnos; admin ve todos
+// (?driver_id=, ?date=). POST: crea un turno nuevo o edita uno
+// existente (?id en el body). El chofer solo maneja sus propios turnos;
+// el admin puede cargar el de cualquier chofer.
 // Visibilidad del chofer en lecturas: solo los últimos 30 días (hoy y 29
 // días para atrás, en fecha del servidor), igual que en trips.js. Una
 // fecha más vieja no devuelve nada; sin fecha, la lista queda acotada a
 // la ventana. El admin no tiene límite. Solo limita lo que se ve: no
-// toca la creación ni la edición de jornadas.
+// toca la creación ni la edición de turnos.
 
 const { getPool, requireAuth, readBody, toNumber, round2, methodNotAllowed } = require('./_db');
 
@@ -32,6 +40,7 @@ function withKm(row) {
     driver_id: row.driver_id,
     driver_name: row.driver_name || null,
     shift_date: dateStr(row.shift_date),
+    exit_date: row.exit_date ? dateStr(row.exit_date) : null,
     taxi_id: row.taxi_id,
     taxi_identifier: row.taxi_identifier || null,
     entry_time: row.entry_time,
@@ -69,6 +78,10 @@ function geoPair(latV, lngV) {
   return lat !== null && lng !== null ? { lat, lng } : null;
 }
 
+function isDate(s) {
+  return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s));
+}
+
 const SELECT_SQL = `
   SELECT s.*, u.name AS driver_name, t.identifier AS taxi_identifier
   FROM day_shifts s
@@ -82,76 +95,108 @@ module.exports = async function handler(req, res) {
   const pool = getPool();
 
   if (req.method === 'GET') {
-    // Jornadas abiertas de un taxi en un día (?open_taxi=<id>&date=AAAA-MM-DD).
-    // Lo usa el aviso de "Empezar día": si otro chofer ya tiene abierta la
-    // jornada de ese taxi, el que empieza ve su nombre y confirma.
-    // Devuelve solo lo mínimo (chofer y taxi); el chofer no ve jornadas de
-    // otros salvo este aviso puntual. Abierta = sin km de cierre.
+    // Turno abierto del chofer (?open_only=1, opcional ?driver_id= para
+    // el admin). Es el turno al que se atan los viajes y gastos nuevos:
+    // puede haber empezado ayer (turno de noche) y seguir abierto hoy.
+    // Devuelve el turno o null. La ventana de 30 días del chofer no se
+    // aplica acá: un turno abierto de ayer tiene que aparecer hoy.
+    if (req.query && req.query.open_only === '1') {
+      const openDriverId = user.role === 'admin' && req.query.driver_id
+        ? Number(req.query.driver_id) : user.id;
+      const open = await pool.query(
+        SELECT_SQL + ' WHERE s.company_id = $1 AND s.driver_id = $2 AND s.exit_km IS NULL ORDER BY s.shift_date DESC, s.id DESC LIMIT 1',
+        [user.company_id, openDriverId]
+      );
+      res.status(200).json(open.rows[0] ? withKm(open.rows[0]) : null);
+      return;
+    }
+    // Turnos abiertos de un taxi (?open_taxi=<id>). Lo usa el aviso de
+    // "Empezar día": si otro chofer ya tiene abierta la jornada de ese
+    // taxi, el que empieza ve su nombre y confirma. Sin filtro de fecha:
+    // un turno de noche abierto ayer sigue ocupando el taxi hoy de
+    // madrugada. Devuelve solo lo mínimo (chofer, taxi y fecha de
+    // inicio); el chofer no ve jornadas de otros salvo este aviso
+    // puntual. Abierta = sin km de cierre. El parámetro ?date= se acepta
+    // por compatibilidad pero ya no filtra (el turno abierto no tiene
+    // fecha de cierre y el de ayer sigue vigente).
     if (req.query && req.query.open_taxi) {
       const taxiId = Number(req.query.open_taxi);
-      const date = req.query.date ? String(req.query.date) : '';
-      if (!taxiId || !date) {
-        res.status(400).json({ error: 'Faltan taxi y fecha' });
+      if (!taxiId) {
+        res.status(400).json({ error: 'Falta el taxi' });
         return;
       }
-      // Límite de visibilidad del chofer (ver encabezado): el aviso de
-      // taxi ocupado solo opera sobre el día que se está empezando,
-      // siempre dentro de la ventana; una fecha más vieja no devuelve nada.
-      if (user.role === 'driver' && date < driverWindowStart()) {
-        res.status(200).json([]);
-        return;
-      }
-      const params = [user.company_id, taxiId, date];
+      const params = [user.company_id, taxiId];
       let openSql = `SELECT s.driver_id, u.name AS driver_name, s.taxi_id, t.identifier AS taxi_identifier, s.shift_date
         FROM day_shifts s JOIN users u ON u.id = s.driver_id
         LEFT JOIN taxis t ON t.id = s.taxi_id
-        WHERE s.company_id = $1 AND s.taxi_id = $2 AND s.shift_date = $3 AND s.exit_km IS NULL`;
+        WHERE s.company_id = $1 AND s.taxi_id = $2 AND s.exit_km IS NULL`;
       if (user.role === 'driver') {
         params.push(user.id);
         openSql += ' AND s.driver_id <> $' + params.length;
       }
-      openSql += ' ORDER BY s.id';
+      openSql += ' ORDER BY s.shift_date DESC, s.id DESC';
       const open = await pool.query(openSql, params);
       res.status(200).json(open.rows.map(function (r) {
         return { driver_id: r.driver_id, driver_name: r.driver_name, taxi_id: r.taxi_id, taxi_identifier: r.taxi_identifier, shift_date: dateStr(r.shift_date) };
       }));
       return;
     }
-    // Último cierre de un taxi en un día (?last_closed_taxi=<id>&date=AAAA-MM-DD).
-    // Lo usa el relevo al empezar el día: si otro chofer ya cerró hoy en
-    // ese taxi, el que empieza precarga hora y km de entrada con ese
-    // cierre y ve "Relevo de [nombre]". Devuelve SOLO nombre, hora y km
-    // de cierre: nunca montos, viajes, gastos ni datos de otros días.
-    // Cerrada = con hora y km de cierre (sin ellos no hay nada que
-    // precargar). "Última" = mayor hora de cierre del día (desempate por
-    // id mayor). Para el chofer se excluye su propia jornada: si el
-    // último cierre es suyo, no hay relevo y devuelve null.
+    // Último cierre de un taxi (?last_closed_taxi=<id>). Lo usa el
+    // relevo al empezar el día: si otro chofer ya cerró en ese taxi, el
+    // que empieza precarga hora y km de entrada con ese cierre y ve
+    // "Relevo de [nombre]". Sin filtro de fecha: el cierre del compañero
+    // de anoche quedó guardado con la fecha de ayer y de madrugada sigue
+    // siendo el último estado del taxi. Devuelve SOLO nombre, hora y km
+    // de cierre (más la fecha de inicio del turno, para mostrar "ayer"):
+    // nunca montos, viajes, gastos ni datos de otros días. Cerrada = con
+    // hora y km de cierre (sin ellos no hay nada que precargar).
+    // "Última" = mayor fecha de inicio del turno, luego mayor hora de
+    // cierre (desempate por id mayor). Para el chofer se excluye su
+    // propio turno: si el último cierre es suyo, no hay relevo y
+    // devuelve null. El parámetro ?date= se acepta por compatibilidad
+    // pero ya no filtra.
     if (req.query && req.query.last_closed_taxi) {
       const taxiId = Number(req.query.last_closed_taxi);
-      const date = req.query.date ? String(req.query.date) : '';
-      if (!taxiId || !date) {
-        res.status(400).json({ error: 'Faltan taxi y fecha' });
+      if (!taxiId) {
+        res.status(400).json({ error: 'Falta el taxi' });
         return;
       }
-      if (user.role === 'driver' && date < driverWindowStart()) {
-        res.status(200).json(null);
-        return;
+      const params = [user.company_id, taxiId];
+      // Sin la migración v11 (exit_date) se usa la versión vieja: mismo
+      // último cierre, sin fecha de cierre. El relevo igual precarga.
+      async function runLastClosed(withExitDate) {
+        let lastSql = 'SELECT u.name AS driver_name, s.exit_time, s.exit_km, s.shift_date' +
+          (withExitDate ? ', s.exit_date' : '') +
+          ` FROM day_shifts s JOIN users u ON u.id = s.driver_id
+        WHERE s.company_id = $1 AND s.taxi_id = $2 AND s.exit_km IS NOT NULL AND s.exit_time IS NOT NULL`;
+        const p = params.slice();
+        if (user.role === 'driver') {
+          p.push(user.id);
+          lastSql += ' AND s.driver_id <> $' + p.length;
+        }
+        lastSql += withExitDate
+          ? ' ORDER BY s.shift_date DESC, s.exit_date DESC NULLS LAST, s.exit_time DESC, s.id DESC LIMIT 1'
+          : ' ORDER BY s.shift_date DESC, s.exit_time DESC, s.id DESC LIMIT 1';
+        return pool.query(lastSql, p);
       }
-      const params = [user.company_id, taxiId, date];
-      let lastSql = `SELECT u.name AS driver_name, s.exit_time, s.exit_km
-        FROM day_shifts s JOIN users u ON u.id = s.driver_id
-        WHERE s.company_id = $1 AND s.taxi_id = $2 AND s.shift_date = $3 AND s.exit_km IS NOT NULL AND s.exit_time IS NOT NULL`;
-      if (user.role === 'driver') {
-        params.push(user.id);
-        lastSql += ' AND s.driver_id <> $' + params.length;
+      let last;
+      try {
+        last = await runLastClosed(true);
+      } catch (e) {
+        if (e && e.code === '42703') last = await runLastClosed(false);
+        else throw e;
       }
-      lastSql += ' ORDER BY s.exit_time DESC, s.id DESC LIMIT 1';
-      const last = await pool.query(lastSql, params);
       if (!last.rows[0]) {
         res.status(200).json(null);
         return;
       }
-      res.status(200).json({ driver_name: last.rows[0].driver_name, exit_time: last.rows[0].exit_time, exit_km: last.rows[0].exit_km });
+      res.status(200).json({
+        driver_name: last.rows[0].driver_name,
+        exit_time: last.rows[0].exit_time,
+        exit_km: last.rows[0].exit_km,
+        shift_date: dateStr(last.rows[0].shift_date),
+        exit_date: last.rows[0].exit_date ? dateStr(last.rows[0].exit_date) : null,
+      });
       return;
     }
     const conditions = [];
@@ -182,7 +227,7 @@ module.exports = async function handler(req, res) {
       conditions.push('s.shift_date >= $' + params.length);
     }
     const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-    const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY s.shift_date DESC', params);
+    const result = await pool.query(SELECT_SQL + ' ' + where + ' ORDER BY s.shift_date DESC, s.id DESC', params);
     res.status(200).json(result.rows.map(withKm));
     return;
   }
@@ -190,17 +235,19 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return methodNotAllowed(res);
   const body = readBody(req);
   // Marcar liquidación (solo el dueño): POST /api/shifts con
-  // { action: 'settle', driver_id, shift_date, settlement }. La marca vive
-  // en la jornada (day_shifts.settlement), por eso va en este archivo y no
-  // en uno nuevo (límite de 12 funciones). No crea ni modifica jornadas:
-  // exige una jornada cerrada existente del chofer en la empresa del
-  // dueño. "Recibido" es solo confirmación; "pagado" significa que el
-  // dueño ya pagó esa deuda en mano, así que ese día no genera saldo a
-  // favor en day-close/report (los días siguientes se calculan sin ese
-  // descuento). Volver a "pendiente" desmarca (por ejemplo, si se marcó
-  // por error) y el saldo vuelve a calcularse. Guardar una jornada nunca
-  // toca la marca. Si la migración v9 todavía no se aplicó, se avisa en
-  // vez de fallar con un error críptico.
+  // { action: 'settle', shift_id, settlement }. La marca vive en la
+  // jornada (day_shifts.settlement), por eso va en este archivo y no
+  // en uno nuevo (límite de 12 funciones). "Recibido" es solo
+  // confirmación; "pagado" significa que el dueño ya pagó esa deuda en
+  // mano, así que ese turno no genera saldo a favor en day-close/report
+  // (los turnos siguientes se calculan sin ese descuento). Volver a
+  // "pendiente" desmarca (por ejemplo, si se marcó por error) y el
+  // saldo vuelve a calcularse. Guardar un turno nunca toca la marca. Si
+  // la migración v9 todavía no se aplicó, se avisa en vez de fallar con
+  // un error críptico. Por compatibilidad se acepta también
+  // { driver_id, shift_date } (sin shift_id), pero SOLO si ese día hay
+  // un único turno cerrado de ese chofer: con dos turnos el mismo día la
+  // fecha no alcanza para saber cuál marcar.
   if (body.action === 'settle') {
     if (user.role !== 'admin') {
       res.status(403).json({ error: 'Sin permiso' });
@@ -211,33 +258,51 @@ module.exports = async function handler(req, res) {
       res.status(400).json({ error: 'Estado de liquidación inválido' });
       return;
     }
-    const settleDriverId = Number(body.driver_id);
-    const settleDate = String(body.shift_date || '');
-    if (!settleDriverId || !/^\d{4}-\d{2}-\d{2}$/.test(settleDate)) {
-      res.status(400).json({ error: 'Faltan chofer y fecha' });
-      return;
+    let settleShift = null;
+    if (body.shift_id) {
+      const found = await pool.query(
+        'SELECT id, exit_km FROM day_shifts WHERE id = $1 AND company_id = $2',
+        [Number(body.shift_id), user.company_id]
+      );
+      settleShift = found.rows[0] || null;
+      if (!settleShift) {
+        res.status(400).json({ error: 'Turno no encontrado' });
+        return;
+      }
+    } else {
+      const settleDriverId = Number(body.driver_id);
+      const settleDate = String(body.shift_date || '');
+      if (!settleDriverId || !isDate(settleDate)) {
+        res.status(400).json({ error: 'Faltan chofer y fecha' });
+        return;
+      }
+      const settleDriver = await pool.query("SELECT id, company_id FROM users WHERE id = $1 AND role = 'driver'", [settleDriverId]);
+      if (!settleDriver.rows[0] || settleDriver.rows[0].company_id !== user.company_id) {
+        res.status(400).json({ error: 'Chofer inválido' });
+        return;
+      }
+      const matches = await pool.query(
+        'SELECT id, exit_km FROM day_shifts WHERE driver_id = $1 AND shift_date = $2 AND company_id = $3 AND exit_km IS NOT NULL ORDER BY id',
+        [settleDriverId, settleDate, user.company_id]
+      );
+      if (!matches.rows.length) {
+        res.status(400).json({ error: 'No hay jornada cargada para ese día' });
+        return;
+      }
+      if (matches.rows.length > 1) {
+        res.status(400).json({ error: 'Ese día tiene más de un turno: marcá la liquidación desde el cierre del turno' });
+        return;
+      }
+      settleShift = matches.rows[0];
     }
-    const settleDriver = await pool.query("SELECT id, company_id FROM users WHERE id = $1 AND role = 'driver'", [settleDriverId]);
-    if (!settleDriver.rows[0] || settleDriver.rows[0].company_id !== user.company_id) {
-      res.status(400).json({ error: 'Chofer inválido' });
-      return;
-    }
-    const settleShift = await pool.query(
-      'SELECT id, exit_km FROM day_shifts WHERE driver_id = $1 AND shift_date = $2 AND company_id = $3',
-      [settleDriverId, settleDate, user.company_id]
-    );
-    if (!settleShift.rows[0]) {
-      res.status(400).json({ error: 'No hay jornada cargada para ese día' });
-      return;
-    }
-    if (settleShift.rows[0].exit_km === null || settleShift.rows[0].exit_km === undefined) {
-      res.status(400).json({ error: 'La jornada todavía está abierta' });
+    if (settleShift.exit_km === null || settleShift.exit_km === undefined) {
+      res.status(400).json({ error: 'El turno todavía está abierto' });
       return;
     }
     try {
       await pool.query(
         "UPDATE day_shifts SET settlement = $1, settled_at = CASE WHEN $1 = 'pendiente' THEN NULL ELSE NOW() END WHERE id = $2",
-        [settlement, settleShift.rows[0].id]
+        [settlement, settleShift.id]
       );
     } catch (e) {
       if (e && e.code === '42703') {
@@ -246,7 +311,7 @@ module.exports = async function handler(req, res) {
       }
       throw e;
     }
-    const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [settleShift.rows[0].id]);
+    const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [settleShift.id]);
     res.status(200).json(withKm(full.rows[0]));
     return;
   }
@@ -261,10 +326,26 @@ module.exports = async function handler(req, res) {
     ? null
     : toNumber(body.exit_km, NaN);
   const exitTime = body.exit_time ? String(body.exit_time) : null;
-  if (!body.shift_date || !body.entry_time || !Number.isFinite(entryKm) || entryKm < 0 ||
+  if (!body.shift_date || !isDate(body.shift_date) || !body.entry_time || !Number.isFinite(entryKm) || entryKm < 0 ||
       (exitKm !== null && (!Number.isFinite(exitKm) || exitKm < 0 || exitKm < entryKm))) {
     res.status(400).json({ error: 'Datos de la jornada inválidos (revisá fecha, hora y kilometraje)' });
     return;
+  }
+  // Fecha de cierre (solo cuando se cierra el turno): no puede ser
+  // anterior a la fecha de inicio. Si no viene y se está cerrando, se
+  // usa la fecha actual del servidor. Si el turno se reabre (sin km de
+  // cierre), la fecha de cierre se borra.
+  let exitDate = null;
+  if (exitKm !== null) {
+    if (body.exit_date && isDate(body.exit_date)) exitDate = body.exit_date;
+    else {
+      const todayRow = await pool.query('SELECT CURRENT_DATE AS d');
+      exitDate = dateStr(todayRow.rows[0].d);
+    }
+    if (exitDate < body.shift_date) {
+      res.status(400).json({ error: 'La fecha de cierre no puede ser anterior a la fecha de inicio' });
+      return;
+    }
   }
   const taxiId = body.taxi_id ? Number(body.taxi_id) : null;
   // El taxi es obligatorio al abrir el día: sin taxi no hay jornada.
@@ -286,51 +367,136 @@ module.exports = async function handler(req, res) {
   // anterior; si vienen vacías, se borran. Tope de 1000 caracteres.
   const noteProvided = typeof body.note === 'string';
   const noteValue = noteProvided ? body.note.trim().slice(0, 1000) : null;
-  const baseParams = [driver.rows[0].company_id, driverId, body.shift_date, taxiId, body.entry_time, entryKm, exitTime, exitKm,
-    entryGeo ? entryGeo.lat : null, entryGeo ? entryGeo.lng : null,
-    exitGeo ? exitGeo.lat : null, exitGeo ? exitGeo.lng : null];
-  async function saveShift(withNote) {
-    if (!withNote) {
+
+  // Editar un turno existente (body.id): el chofer solo edita los
+  // suyos; el admin cualquiera de su empresa. Reabrir (quitar el km de
+  // cierre) solo se permite si el chofer no tiene OTRO turno abierto.
+  const editId = body.id ? Number(body.id) : null;
+  if (editId) {
+    const current = await pool.query('SELECT * FROM day_shifts WHERE id = $1 AND company_id = $2', [editId, user.company_id]);
+    if (!current.rows[0]) {
+      res.status(400).json({ error: 'Turno no encontrado' });
+      return;
+    }
+    if (user.role === 'driver' && current.rows[0].driver_id !== user.id) {
+      res.status(403).json({ error: 'Sin permiso' });
+      return;
+    }
+    if (exitKm === null && current.rows[0].exit_km !== null) {
+      const otherOpen = await pool.query(
+        'SELECT id FROM day_shifts WHERE driver_id = $1 AND exit_km IS NULL AND id <> $2 LIMIT 1',
+        [driverId, editId]
+      );
+      if (otherOpen.rows[0]) {
+        res.status(400).json({ error: 'Ya tenés otro turno abierto: cerralo antes de reabrir este' });
+        return;
+      }
+    }
+    // Actualizar un turno existente (cerrar, corregir o reabrir): si la
+    // migración v11 (exit_date) o v8 (note) todavía no se aplicó, se
+    // guarda el turno igual sin esos campos en vez de trabar el cierre
+    // del día (mismo patrón que insertShift abajo).
+    async function updateShift(withNote, withExitDate) {
+      const sets = ['taxi_id = $1', 'entry_time = $2', 'entry_km = $3', 'exit_time = $4', 'exit_km = $5'];
+      const vals = [taxiId, body.entry_time, entryKm, exitTime, exitKm];
+      if (withExitDate) { sets.push('exit_date = $' + (vals.length + 1)); vals.push(exitDate); }
+      sets.push(
+        'entry_lat = COALESCE($' + (vals.length + 1) + ', entry_lat)',
+        'entry_lng = COALESCE($' + (vals.length + 1) + ', entry_lng)',
+        'exit_lat = COALESCE($' + (vals.length + 1) + ', exit_lat)',
+        'exit_lng = COALESCE($' + (vals.length + 1) + ', exit_lng)'
+      );
+      vals.push(
+        entryGeo ? entryGeo.lat : null, entryGeo ? entryGeo.lng : null,
+        exitGeo ? exitGeo.lat : null, exitGeo ? exitGeo.lng : null
+      );
+      if (withNote) { sets.push('note = $' + (vals.length + 1)); vals.push(noteValue); }
+      vals.push(editId);
       return pool.query(
-        `INSERT INTO day_shifts (company_id, driver_id, shift_date, taxi_id, entry_time, entry_km, exit_time, exit_km, entry_lat, entry_lng, exit_lat, exit_lng)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         ON CONFLICT (driver_id, shift_date) DO UPDATE
-           SET taxi_id = EXCLUDED.taxi_id, entry_time = EXCLUDED.entry_time,
-               entry_km = EXCLUDED.entry_km, exit_time = EXCLUDED.exit_time,
-               exit_km = EXCLUDED.exit_km,
-               entry_lat = COALESCE(EXCLUDED.entry_lat, day_shifts.entry_lat),
-               entry_lng = COALESCE(EXCLUDED.entry_lng, day_shifts.entry_lng),
-               exit_lat = COALESCE(EXCLUDED.exit_lat, day_shifts.exit_lat),
-               exit_lng = COALESCE(EXCLUDED.exit_lng, day_shifts.exit_lng)
-         RETURNING *`,
-        baseParams
+        'UPDATE day_shifts SET ' + sets.join(', ') + ' WHERE id = $' + vals.length + ' RETURNING *',
+        vals
       );
     }
+    let upd;
+    try {
+      upd = await updateShift(noteProvided, true);
+    } catch (e) {
+      if (e && e.code === '42703') {
+        try { upd = await updateShift(noteProvided, false); }
+        catch (e2) {
+          if (e2 && e2.code === '42703') upd = await updateShift(false, false);
+          else throw e2;
+        }
+      } else throw e;
+    }
+    const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [upd.rows[0].id]);
+    res.status(200).json(withKm(full.rows[0]));
+    return;
+  }
+
+  // Crear un turno nuevo: el chofer no puede tener otro turno abierto
+  // (ni siquiera de ayer: un turno de noche abierto sigue vigente).
+  // El índice parcial v11 lo respalda en la base; acá se da el mensaje
+  // claro antes de intentar el insert.
+  const alreadyOpen = await pool.query(
+    'SELECT id, shift_date FROM day_shifts WHERE driver_id = $1 AND exit_km IS NULL LIMIT 1',
+    [driverId]
+  );
+  if (alreadyOpen.rows[0]) {
+    res.status(400).json({ error: 'Ya tenés un turno abierto del ' + dateStr(alreadyOpen.rows[0].shift_date) + ': cerralo antes de empezar otro' });
+    return;
+  }
+  // Km de entrada anclado al último cierre del taxi (pedido del dueño,
+  // Nov 2026): el auto no puede abrir varios km por encima de su último
+  // cierre — eso es un error de tipeo o un uso sin registrar. El umbral
+  // es el mismo de la alerta de km (3 km). Solo se aplica al crear un
+  // turno cuya fecha no sea anterior al último cierre (así no se traban
+  // las cargas viejas del admin). Si el km es correcto, el dueño corrige
+  // el cierre anterior en Cierres y el chofer vuelve a abrir.
+  const lastClose = await pool.query(
+    'SELECT exit_km, shift_date FROM day_shifts WHERE company_id = $1 AND taxi_id = $2 AND exit_km IS NOT NULL ORDER BY shift_date DESC, id DESC LIMIT 1',
+    [driver.rows[0].company_id, taxiId]
+  );
+  if (lastClose.rows[0]) {
+    const prevKm = Number(lastClose.rows[0].exit_km);
+    const lastDate = dateStr(lastClose.rows[0].shift_date);
+    if (body.shift_date >= lastDate && entryKm > prevKm + 3) {
+      const over = Math.round((entryKm - prevKm) * 100) / 100;
+      res.status(400).json({ error: 'El último cierre de este taxi fue ' + prevKm + ' km. No podés abrir con ' + entryKm + ' km (' + over + ' km arriba). Si el km es correcto, pedile al dueño que corrija el cierre anterior en Cierres.' });
+      return;
+    }
+  }
+  async function insertShift(withNote, withExitDate) {
+    const cols = ['company_id', 'driver_id', 'shift_date', 'taxi_id', 'entry_time', 'entry_km', 'exit_time', 'exit_km',
+      'entry_lat', 'entry_lng', 'exit_lat', 'exit_lng'];
+    const vals = [driver.rows[0].company_id, driverId, body.shift_date, taxiId, body.entry_time, entryKm, exitTime, exitKm,
+      entryGeo ? entryGeo.lat : null, entryGeo ? entryGeo.lng : null,
+      exitGeo ? exitGeo.lat : null, exitGeo ? exitGeo.lng : null];
+    if (withExitDate) { cols.push('exit_date'); vals.push(exitDate); }
+    if (withNote) { cols.push('note'); vals.push(noteValue); }
+    const placeholders = vals.map(function (_, i) { return '$' + (i + 1); }).join(', ');
     return pool.query(
-      `INSERT INTO day_shifts (company_id, driver_id, shift_date, taxi_id, entry_time, entry_km, exit_time, exit_km, entry_lat, entry_lng, exit_lat, exit_lng, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       ON CONFLICT (driver_id, shift_date) DO UPDATE
-         SET taxi_id = EXCLUDED.taxi_id, entry_time = EXCLUDED.entry_time,
-             entry_km = EXCLUDED.entry_km, exit_time = EXCLUDED.exit_time,
-             exit_km = EXCLUDED.exit_km,
-             entry_lat = COALESCE(EXCLUDED.entry_lat, day_shifts.entry_lat),
-             entry_lng = COALESCE(EXCLUDED.entry_lng, day_shifts.entry_lng),
-             exit_lat = COALESCE(EXCLUDED.exit_lat, day_shifts.exit_lat),
-             exit_lng = COALESCE(EXCLUDED.exit_lng, day_shifts.exit_lng),
-             note = COALESCE(EXCLUDED.note, day_shifts.note)
-       RETURNING *`,
-      baseParams.concat([noteValue])
+      'INSERT INTO day_shifts (' + cols.join(', ') + ') VALUES (' + placeholders + ') RETURNING *',
+      vals
     );
   }
-  // Si la migración v8 todavía no se aplicó, la columna note no existe:
-  // en ese caso se guarda la jornada igual (sin aclaraciones) en vez de
+  // Si las migraciones v8 (note) o v11 (exit_date) todavía no se
+  // aplicaron, se guarda el turno igual (sin esos campos) en vez de
   // trabar el inicio o el cierre del día.
   let saved;
   try {
-    saved = await saveShift(true);
+    saved = await insertShift(true, true);
   } catch (e) {
-    if (e && e.code === '42703') saved = await saveShift(false);
-    else throw e;
+    if (e && e.code === '42703') {
+      try { saved = await insertShift(true, false); }
+      catch (e2) {
+        if (e2 && e2.code === '42703') saved = await insertShift(false, false);
+        else throw e2;
+      }
+    } else if (e && e.code === '23505') {
+      res.status(400).json({ error: 'Ya tenés un turno abierto: cerralo antes de empezar otro' });
+      return;
+    } else throw e;
   }
   const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [saved.rows[0].id]);
   res.status(200).json(withKm(full.rows[0]));

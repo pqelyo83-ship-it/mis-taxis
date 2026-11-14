@@ -96,8 +96,10 @@ CREATE INDEX IF NOT EXISTS idx_trips_driver_date ON trips(driver_id, trip_date);
 CREATE INDEX IF NOT EXISTS idx_expenses_driver_date ON expenses(driver_id, expense_date);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 
--- Jornada del día (un registro por chofer y día): taxi del día, hora y km
--- de entrada y hora y km de salida. Los viajes después solo llevan monto.
+-- Turno (jornada) de un chofer: una sesión de trabajo que empieza un
+-- día y puede cerrar al otro (turno de noche; ver migración v11:
+-- exit_date, varios turnos por día, un solo turno abierto por chofer).
+-- Los viajes y gastos se atan al turno (shift_id), no a la fecha.
 CREATE TABLE IF NOT EXISTS day_shifts (
   id SERIAL PRIMARY KEY,
   company_id INTEGER REFERENCES companies(id),
