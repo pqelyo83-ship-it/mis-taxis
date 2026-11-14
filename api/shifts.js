@@ -397,20 +397,25 @@ module.exports = async function handler(req, res) {
     // guarda el turno igual sin esos campos en vez de trabar el cierre
     // del día (mismo patrón que insertShift abajo).
     async function updateShift(withNote, withExitDate) {
-      const sets = ['taxi_id = $1', 'entry_time = $2', 'entry_km = $3', 'exit_time = $4', 'exit_km = $5'];
-      const vals = [taxiId, body.entry_time, entryKm, exitTime, exitKm];
-      if (withExitDate) { sets.push('exit_date = $' + (vals.length + 1)); vals.push(exitDate); }
-      sets.push(
-        'entry_lat = COALESCE($' + (vals.length + 1) + ', entry_lat)',
-        'entry_lng = COALESCE($' + (vals.length + 1) + ', entry_lng)',
-        'exit_lat = COALESCE($' + (vals.length + 1) + ', exit_lat)',
-        'exit_lng = COALESCE($' + (vals.length + 1) + ', exit_lng)'
-      );
-      vals.push(
-        entryGeo ? entryGeo.lat : null, entryGeo ? entryGeo.lng : null,
-        exitGeo ? exitGeo.lat : null, exitGeo ? exitGeo.lng : null
-      );
-      if (withNote) { sets.push('note = $' + (vals.length + 1)); vals.push(noteValue); }
+      // Parámetros en orden, cada valor referenciado una sola vez (el
+      // armado anterior repetía $7 en las cuatro coordenadas y dejaba
+      // $8-$10 sin referenciar: el cierre daba 500 aunque el SQL en
+      // texto plano andaba bien en Neon).
+      const sets = [];
+      const vals = [];
+      const set = (col, value) => { vals.push(value); sets.push(col + ' = $' + vals.length); };
+      const setKeep = (col, value) => { vals.push(value); sets.push(col + ' = COALESCE($' + vals.length + ', ' + col + ')'); };
+      set('taxi_id', taxiId);
+      set('entry_time', body.entry_time);
+      set('entry_km', entryKm);
+      set('exit_time', exitTime);
+      set('exit_km', exitKm);
+      if (withExitDate) set('exit_date', exitDate);
+      setKeep('entry_lat', entryGeo ? entryGeo.lat : null);
+      setKeep('entry_lng', entryGeo ? entryGeo.lng : null);
+      setKeep('exit_lat', exitGeo ? exitGeo.lat : null);
+      setKeep('exit_lng', exitGeo ? exitGeo.lng : null);
+      if (withNote) set('note', noteValue);
       vals.push(editId);
       return pool.query(
         'UPDATE day_shifts SET ' + sets.join(', ') + ' WHERE id = $' + vals.length + ' RETURNING *',
