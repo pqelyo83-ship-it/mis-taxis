@@ -1034,10 +1034,20 @@
           // el bloqueo del backend): frena el error de tipeo antes de
           // enviar. relevoActual guarda el último relevo buscado.
           var relevoActual = null;
+          // Turnos abiertos de otros choferes en este taxi (relevo v12):
+          // si hay uno, al empezar se cierra con el km que se tipea y se
+          // avisa al dueño, así que el aviso de "no se va a poder abrir"
+          // no aplica y se muestra el del cierre automático.
+          var taxiAbiertoPor = null;
           var kmHintEl = document.getElementById('km-entry-hint');
           function actualizarAvisoKm() {
             if (!kmHintEl || !startForm) return;
             var v = Number(startForm.entry_km.value);
+            if (taxiAbiertoPor && taxiAbiertoPor.length) {
+              var abNames = taxiAbiertoPor.map(function (o) { return o.driver_name; }).join(', ');
+              kmHintEl.textContent = '⚠ Este taxi tiene jornada abierta por ' + abNames + '. Si empezás, su jornada se cierra con tus ' + (startForm.entry_km.value !== '' ? startForm.entry_km.value : '…') + ' km y se avisa al dueño.';
+              return;
+            }
             if (relevoActual && relevoActual.exit_km !== null && relevoActual.exit_km !== undefined && isFinite(v) && v > Number(relevoActual.exit_km) + 3) {
               var over = Math.round((v - Number(relevoActual.exit_km)) * 100) / 100;
               kmHintEl.textContent = '⚠ El último cierre de este taxi fue ' + relevoActual.exit_km + ' km. Con ' + startForm.entry_km.value + ' km quedás ' + over + ' km arriba y no se va a poder abrir así: si el km es correcto, pedile al dueño que corrija el cierre anterior.';
@@ -1051,6 +1061,8 @@
             if (!startForm || !relevoBox) return;
             var seq = ++relevoSeq;
             var r = await relevoBuscar(startForm.taxi_id.value, date);
+            var abierto = [];
+            try { abierto = await api('/api/shifts?open_taxi=' + encodeURIComponent(startForm.taxi_id.value) + '&date=' + encodeURIComponent(date)); } catch (e) { abierto = []; }
             if (seq !== relevoSeq) return;
             if (r) {
               relevoPrefill(startForm, r, relevoTocado);
@@ -1059,6 +1071,7 @@
               relevoBox.innerHTML = '';
             }
             relevoActual = r || null;
+            taxiAbiertoPor = abierto || null;
             actualizarAvisoKm();
           }
           startForm.taxi_id.addEventListener('change', aplicarRelevo);
@@ -1087,7 +1100,7 @@
                 var taxiName = (taxis.find(function (t) { return String(t.id) === String(f.taxi_id.value); }) || {}).identifier || 'elegido';
                 var names = open.map(function (o) { return o.driver_name; }).join(', ');
                 var desde = (open[0] && open[0].shift_date) ? ' (desde el ' + open[0].shift_date + ')' : '';
-                if (!confirm('El taxi ' + taxiName + ' ya tiene jornada abierta por ' + names + desde + '. ¿Igual querés empezar tu día en este taxi?')) return;
+                if (!confirm('El taxi ' + taxiName + ' ya tiene jornada abierta por ' + names + desde + '. Si empezás, su jornada se cierra con tus ' + f.entry_km.value + ' km y se avisa al dueño. ¿Igual querés empezar tu día en este taxi?')) return;
               }
             } catch (e) { /* sin aviso, se sigue igual */ }
             var body = {
@@ -1100,8 +1113,15 @@
             };
             if (entryGeo) { body.entry_lat = entryGeo.lat; body.entry_lng = entryGeo.lng; }
             try {
-              await api('/api/shifts', 'POST', body);
-              showMessage('Día empezado.', 'ok');
+              var savedShift = await api('/api/shifts', 'POST', body);
+              var startedMsg = 'Día empezado.';
+              if (savedShift && savedShift.auto_closed_shifts && savedShift.auto_closed_shifts.length) {
+                startedMsg += ' Se cerró el turno de ' + savedShift.auto_closed_shifts.map(function (a) {
+                  var diff = (a.km_driven !== null && a.km_driven !== undefined && a.km_driven < 0) ? ' (diferencia de ' + (-a.km_driven) + ' km, se avisó al dueño)' : '';
+                  return a.driver_name + ' (' + a.shift_date + ') con ' + a.exit_km + ' km' + diff;
+                }).join(', ') + '.';
+              }
+              showMessage(startedMsg, 'ok');
               load();
             } catch (e) { showMessage(e.message, 'error'); }
           });
@@ -2103,14 +2123,25 @@
         '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
     }).join('');
 
+    // Cierres automáticos por relevo de los últimos 7 días (v12): el
+    // dueño los ve en el Resumen aunque el turno sea de otro día.
+    var autoClosedRecent = [];
+    if (user.role === 'admin') {
+      try {
+        var allAuto = await api('/api/shifts?auto_closed=1');
+        var autoSince = daysAgoLocal(6);
+        autoClosedRecent = (allAuto || []).filter(function (s) { return s.shift_date >= autoSince; });
+      } catch (e) { autoClosedRecent = []; }
+    }
     var kmAlerts = closes.filter(function (c) { return c.km_alert; });
     var openShifts = closes.filter(function (c) { return c.shift_entry_time && !c.shift_exit_time; });
     var missing = closes.filter(function (c) { return !c.shift_entry_time; });
     var alertHtml = '';
-    if (!kmAlerts.length && !openShifts.length && !missing.length) {
+    if (!kmAlerts.length && !openShifts.length && !missing.length && !autoClosedRecent.length) {
       alertHtml = '<p class="ok">Sin alertas hoy.</p>';
     } else {
       if (kmAlerts.length) alertHtml += '<p>⚠ Alerta de km: ' + kmAlerts.map(function (c) { return esc(c.driver_name) + ' (' + esc(c.shift_taxi || '') + ', +' + esc(c.km_over) + ' km)'; }).join(', ') + '</p>';
+      if (autoClosedRecent.length) alertHtml += '<p>⚠ Cierre automático por relevo: ' + autoClosedRecent.map(function (s) { var d = (s.km_driven !== null && s.km_driven !== undefined && Number(s.km_driven) < 0) ? ', ' + (-Number(s.km_driven)) + ' km por debajo de su entrada' : ''; return esc(s.driver_name) + ' (' + esc(s.taxi_identifier || '') + ', ' + esc(s.shift_date) + ', cerró con ' + esc(s.exit_km) + ' km' + d + ')'; }).join(', ') + '</p>';
       if (openShifts.length) alertHtml += '<p>Jornadas sin cerrar: ' + openShifts.map(function (c) { return esc(c.driver_name); }).join(', ') + '</p>';
       if (missing.length) alertHtml += '<p>Sin jornada hoy: ' + missing.map(function (c) { return esc(c.driver_name); }).join(', ') + '</p>';
     }
@@ -2728,6 +2759,7 @@
       return '<div class="card"><h3>' + esc(c.driver_name) + ' · ' + dateLabel + '</h3>' +
         '<p>Viajes: ' + esc(c.trips_count) + '</p>' + shiftLine +
         (showKmAlert && c.km_alert ? '<p class="error">⚠ Alerta de km: este taxi abrió el día ' + esc(c.km_over) + ' km por encima de su último cierre (' + esc(c.prev_exit_km) + ' km).</p>' : '') +
+        (c.auto_closed ? '<p class="error">⚠ Este turno se cerró automáticamente cuando otro chofer abrió el taxi con ' + esc(c.shift_exit_km) + ' km.</p>' + (c.km_backwards ? '<p class="error">Diferencia de km: el cierre quedó ' + esc(-Number(c.km_driven)) + ' km por debajo de la entrada (' + esc(c.shift_entry_km) + ' km).</p>' : '') : '') +
         '<p>Total recaudado</p><p class="big-number">' + money(c.total_collected) + '</p>' +
         '<p>Te quedás / Se queda el chofer: <strong>' + money(c.driver_keeps) + '</strong></p>' +
         '<p>Gastos del día: ' + money(c.expenses) + '</p>' +
@@ -2795,7 +2827,9 @@
       var pending = lastCloses.filter(isPendingClose);
       var shown = pendingOnlyBox.checked ? pending : lastCloses;
       var alerts = lastCloses.filter(function (c) { return c.km_alert; }).length;
+      var autoN = lastCloses.filter(function (c) { return c.auto_closed; }).length;
       var banner = alerts ? '<p class="error">⚠ Alerta de km: ' + alerts + ' jornada(s) abrieron con más de 3 km por encima del último cierre de su taxi.</p>' : '';
+      if (autoN) banner += '<p class="error">⚠ Cierre automático: ' + autoN + ' jornada(s) se cerraron solas cuando otro chofer abrió el taxi. Revisar la diferencia de km en cada tarjeta.</p>';
       banner += '<p>Pendientes de liquidar: ' + pending.length + '.</p>';
       result.innerHTML = banner + (shown.length ? closeCardsHtml(shown, true) : '<p class="muted">Sin datos para esa fecha.</p>');
       wireSettleButtons(load);

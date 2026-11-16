@@ -55,6 +55,7 @@ function withKm(row) {
     settlement: row.settlement || 'pendiente',
     settled_at: row.settled_at || null,
     km_driven: km,
+    auto_closed: row.auto_closed === true,
     created_at: row.created_at,
   };
 }
@@ -139,6 +140,29 @@ module.exports = async function handler(req, res) {
       res.status(200).json(open.rows.map(function (r) {
         return { driver_id: r.driver_id, driver_name: r.driver_name, taxi_id: r.taxi_id, taxi_identifier: r.taxi_identifier, shift_date: dateStr(r.shift_date) };
       }));
+      return;
+    }
+    // Turnos cerrados automáticamente por relevo (?auto_closed=1, solo
+    // admin). Lo usa el Resumen para avisarle al dueño que hay cierres
+    // automáticos con diferencia de km para revisar. Sin la migración
+    // v12 no hay ninguno: devuelve lista vacía.
+    if (req.query && req.query.auto_closed === '1') {
+      if (user.role !== 'admin') {
+        res.status(403).json({ error: 'Sin permiso' });
+        return;
+      }
+      let autoRows = [];
+      try {
+        const found = await pool.query(
+          SELECT_SQL + ' WHERE s.company_id = $1 AND s.auto_closed = TRUE ORDER BY s.shift_date DESC, s.id DESC LIMIT 20',
+          [user.company_id]
+        );
+        autoRows = found.rows;
+      } catch (e) {
+        if (e && e.code === '42703') autoRows = [];
+        else throw e;
+      }
+      res.status(200).json(autoRows.map(withKm));
       return;
     }
     // Último cierre de un taxi (?last_closed_taxi=<id>). Lo usa el
@@ -462,16 +486,32 @@ module.exports = async function handler(req, res) {
     'SELECT exit_km, shift_date FROM day_shifts WHERE company_id = $1 AND taxi_id = $2 AND exit_km IS NOT NULL ORDER BY shift_date DESC, id DESC LIMIT 1',
     [driver.rows[0].company_id, taxiId]
   );
-  if (lastClose.rows[0]) {
-    const prevKm = Number(lastClose.rows[0].exit_km);
-    const lastDate = dateStr(lastClose.rows[0].shift_date);
+  const prevKm = lastClose.rows[0] ? Number(lastClose.rows[0].exit_km) : null;
+  const lastDate = lastClose.rows[0] ? dateStr(lastClose.rows[0].shift_date) : null;
+  // Cierre automático por relevo (v12, pedido del dueño Nov 2026): el
+  // kilometraje es del auto, no del chofer. Si otro chofer tiene un turno
+  // abierto en este taxi, abrir lo cierra con el km/hora/fecha con los
+  // que arranca el turno nuevo (el auto siguió andando con el compañero
+  // y el km de entrada de hoy ES el km de cierre del turno anterior).
+  // La diferencia queda marcada (auto_closed) y el dueño la ve en
+  // Cierres y en Resumen. Con turno abierto ajeno NO se aplica el
+  // bloqueo de +3 km: el compañero anduvo desde el último cierre, así
+  // que entrar por encima es lo esperado; si el km no cierra, el dueño
+  // lo ve y lo corrige en Cierres. Solo se cierran turnos abiertos
+  // empezados hasta la fecha del turno nuevo.
+  const openOthers = await pool.query(
+    'SELECT s.id, s.driver_id, s.shift_date, s.entry_km, u.name AS driver_name FROM day_shifts s JOIN users u ON u.id = s.driver_id WHERE s.company_id = $1 AND s.taxi_id = $2 AND s.exit_km IS NULL AND s.driver_id <> $3 AND s.shift_date <= $4 ORDER BY s.shift_date, s.id',
+    [driver.rows[0].company_id, taxiId, driverId, body.shift_date]
+  );
+  const others = openOthers.rows;
+  if (!others.length && lastClose.rows[0]) {
     if (body.shift_date >= lastDate && entryKm > prevKm + 3) {
       const over = Math.round((entryKm - prevKm) * 100) / 100;
       res.status(400).json({ error: 'El último cierre de este taxi fue ' + prevKm + ' km. No podés abrir con ' + entryKm + ' km (' + over + ' km arriba). Si el km es correcto, pedile al dueño que corrija el cierre anterior en Cierres.' });
       return;
     }
   }
-  async function insertShift(withNote, withExitDate) {
+  async function insertShift(q, withNote, withExitDate) {
     const cols = ['company_id', 'driver_id', 'shift_date', 'taxi_id', 'entry_time', 'entry_km', 'exit_time', 'exit_km',
       'entry_lat', 'entry_lng', 'exit_lat', 'exit_lng'];
     const vals = [driver.rows[0].company_id, driverId, body.shift_date, taxiId, body.entry_time, entryKm, exitTime, exitKm,
@@ -480,7 +520,7 @@ module.exports = async function handler(req, res) {
     if (withExitDate) { cols.push('exit_date'); vals.push(exitDate); }
     if (withNote) { cols.push('note'); vals.push(noteValue); }
     const placeholders = vals.map(function (_, i) { return '$' + (i + 1); }).join(', ');
-    return pool.query(
+    return q.query(
       'INSERT INTO day_shifts (' + cols.join(', ') + ') VALUES (' + placeholders + ') RETURNING *',
       vals
     );
@@ -488,21 +528,77 @@ module.exports = async function handler(req, res) {
   // Si las migraciones v8 (note) o v11 (exit_date) todavía no se
   // aplicaron, se guarda el turno igual (sin esos campos) en vez de
   // trabar el inicio o el cierre del día.
-  let saved;
-  try {
-    saved = await insertShift(true, true);
-  } catch (e) {
-    if (e && e.code === '42703') {
-      try { saved = await insertShift(true, false); }
-      catch (e2) {
-        if (e2 && e2.code === '42703') saved = await insertShift(false, false);
-        else throw e2;
+  async function insertShiftTx(q) {
+    const combos = [[true, true], [true, false], [false, false]];
+    let lastErr = null;
+    for (const combo of combos) {
+      try { return await insertShift(q, combo[0], combo[1]); }
+      catch (e) {
+        if (e && e.code === '42703') { lastErr = e; continue; }
+        throw e;
       }
-    } else if (e && e.code === '23505') {
-      res.status(400).json({ error: 'Ya tenés un turno abierto: cerralo antes de empezar otro' });
-      return;
-    } else throw e;
+    }
+    throw lastErr;
+  }
+  let saved;
+  let autoClosedInfo = [];
+  if (!others.length) {
+    try {
+      saved = await insertShiftTx(pool);
+    } catch (e) {
+      if (e && e.code === '23505') {
+        res.status(400).json({ error: 'Ya tenés un turno abierto: cerralo antes de empezar otro' });
+        return;
+      }
+      throw e;
+    }
+  } else {
+    // Con relevo, el cierre del turno anterior y la creación del nuevo
+    // van en una sola transacción: si no se puede crear el turno, el
+    // anterior no se toca.
+    let hasAutoClosed = false;
+    try {
+      const col = await pool.query("SELECT 1 FROM information_schema.columns WHERE table_name = 'day_shifts' AND column_name = 'auto_closed'");
+      hasAutoClosed = col.rows.length > 0;
+    } catch (e) { hasAutoClosed = false; }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const o of others) {
+        await client.query(
+          hasAutoClosed
+            ? 'UPDATE day_shifts SET exit_km = $1, exit_date = $2, exit_time = $3, auto_closed = TRUE WHERE id = $4'
+            : 'UPDATE day_shifts SET exit_km = $1, exit_date = $2, exit_time = $3 WHERE id = $4',
+          [entryKm, body.shift_date, body.entry_time, o.id]
+        );
+        autoClosedInfo.push({
+          driver_name: o.driver_name,
+          shift_date: dateStr(o.shift_date),
+          entry_km: Number(o.entry_km),
+          exit_km: entryKm,
+          km_driven: round2(entryKm - Number(o.entry_km)),
+          km_diff_vs_last_close: prevKm !== null ? round2(entryKm - prevKm) : null,
+        });
+      }
+      saved = await insertShiftTx(client);
+      await client.query('COMMIT');
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (e2) { /* ya está cerrado */ }
+      if (e && e.code === '23514') {
+        res.status(400).json({ error: 'No se pudo cerrar el turno abierto de ' + others[0].driver_name + ' en este taxi con ' + entryKm + ' km (el km no cierra). Pedile al dueño que lo cierre en Cierres.' });
+        return;
+      }
+      if (e && e.code === '23505') {
+        res.status(400).json({ error: 'Ya tenés un turno abierto: cerralo antes de empezar otro' });
+        return;
+      }
+      throw e;
+    } finally {
+      client.release();
+    }
   }
   const full = await pool.query(SELECT_SQL + ' WHERE s.id = $1', [saved.rows[0].id]);
-  res.status(200).json(withKm(full.rows[0]));
+  const created = withKm(full.rows[0]);
+  if (autoClosedInfo.length) created.auto_closed_shifts = autoClosedInfo;
+  res.status(200).json(created);
 };

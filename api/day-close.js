@@ -315,6 +315,8 @@ module.exports = async function handler(req, res) {
         km_alert: false,
         km_over: null,
         prev_exit_km: null,
+        auto_closed: false,
+        km_backwards: false,
       });
     }
     for (const sh of wanted) {
@@ -498,6 +500,12 @@ module.exports = async function handler(req, res) {
         km_alert: kmAlert,
         km_over: kmAlert ? kmOver : null,
         prev_exit_km: prevExitKm,
+        // Cierre automático por relevo (v12): el turno se cerró solo
+        // cuando otro chofer abrió el mismo taxi. km_backwards marca que
+        // el km de cierre quedó por debajo del de entrada (el odómetro no
+        // cierra): es la diferencia que el dueño tiene que revisar.
+        auto_closed: sh.auto_closed === true,
+        km_backwards: isClosed && kmDriven !== null && kmDriven < 0,
       });
     }
   }
