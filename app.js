@@ -1030,9 +1030,10 @@
           // de relevo, ese campo no se precarga: nunca se pisa lo tipeado.
           var relevoTocado = { time: false, km: false };
           // Aviso en vivo si el km tipeado queda más de 3 km por encima
-          // del último cierre del taxi (mismo umbral que la alerta y que
-          // el bloqueo del backend): frena el error de tipeo antes de
-          // enviar. relevoActual guarda el último relevo buscado.
+          // del último cierre del taxi (mismo umbral que la alerta del
+          // dueño): es solo un aviso, no bloquea — si el km es correcto
+          // se abre igual y se avisa al dueño. relevoActual guarda el
+          // último relevo buscado.
           var relevoActual = null;
           // Turnos abiertos de otros choferes en este taxi (relevo v12):
           // si hay uno, al empezar se cierra con el km que se tipea y se
@@ -1050,7 +1051,7 @@
             }
             if (relevoActual && relevoActual.exit_km !== null && relevoActual.exit_km !== undefined && isFinite(v) && v > Number(relevoActual.exit_km) + 3) {
               var over = Math.round((v - Number(relevoActual.exit_km)) * 100) / 100;
-              kmHintEl.textContent = '⚠ El último cierre de este taxi fue ' + relevoActual.exit_km + ' km. Con ' + startForm.entry_km.value + ' km quedás ' + over + ' km arriba y no se va a poder abrir así: si el km es correcto, pedile al dueño que corrija el cierre anterior.';
+              kmHintEl.textContent = '⚠ El último cierre de este taxi fue ' + relevoActual.exit_km + ' km. Con ' + startForm.entry_km.value + ' km quedás ' + over + ' km arriba: se abre igual y se avisa al dueño.';
             } else {
               kmHintEl.textContent = '';
             }

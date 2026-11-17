@@ -475,19 +475,19 @@ module.exports = async function handler(req, res) {
     res.status(400).json({ error: 'Ya tenés un turno abierto del ' + dateStr(alreadyOpen.rows[0].shift_date) + ': cerralo antes de empezar otro' });
     return;
   }
-  // Km de entrada anclado al último cierre del taxi (pedido del dueño,
-  // Nov 2026): el auto no puede abrir varios km por encima de su último
-  // cierre — eso es un error de tipeo o un uso sin registrar. El umbral
-  // es el mismo de la alerta de km (3 km). Solo se aplica al crear un
-  // turno cuya fecha no sea anterior al último cierre (así no se traban
-  // las cargas viejas del admin). Si el km es correcto, el dueño corrige
-  // el cierre anterior en Cierres y el chofer vuelve a abrir.
+  // Km de entrada y último cierre del taxi (regla del dueño, Nov 2026):
+  // el km es del auto, no del chofer, y el cierre de un turno NO siempre
+  // es la apertura del siguiente: el dueño puede usar el auto para uso
+  // personal o moverlo entre turnos. Por eso NUNCA se bloquea la apertura
+  // por km: si el chofer entra varios km por encima del último cierre,
+  // se abre igual y la diferencia queda marcada para el dueño en Cierres
+  // y en Resumen (alerta de km, mismo umbral de 3 km). Si el km es un
+  // error de tipeo, el dueño lo corrige en Cierres.
   const lastClose = await pool.query(
     'SELECT exit_km, shift_date FROM day_shifts WHERE company_id = $1 AND taxi_id = $2 AND exit_km IS NOT NULL ORDER BY shift_date DESC, id DESC LIMIT 1',
     [driver.rows[0].company_id, taxiId]
   );
   const prevKm = lastClose.rows[0] ? Number(lastClose.rows[0].exit_km) : null;
-  const lastDate = lastClose.rows[0] ? dateStr(lastClose.rows[0].shift_date) : null;
   // Cierre automático por relevo (v12, pedido del dueño Nov 2026): el
   // kilometraje es del auto, no del chofer. Si otro chofer tiene un turno
   // abierto en este taxi, abrir lo cierra con el km/hora/fecha con los
@@ -504,13 +504,8 @@ module.exports = async function handler(req, res) {
     [driver.rows[0].company_id, taxiId, driverId, body.shift_date]
   );
   const others = openOthers.rows;
-  if (!others.length && lastClose.rows[0]) {
-    if (body.shift_date >= lastDate && entryKm > prevKm + 3) {
-      const over = Math.round((entryKm - prevKm) * 100) / 100;
-      res.status(400).json({ error: 'El último cierre de este taxi fue ' + prevKm + ' km. No podés abrir con ' + entryKm + ' km (' + over + ' km arriba). Si el km es correcto, pedile al dueño que corrija el cierre anterior en Cierres.' });
-      return;
-    }
-  }
+  // (v13, Nov 2026: sin bloqueo de km al abrir — ver comentario de arriba.
+  // La diferencia con el último cierre se avisa al dueño en Cierres/Resumen.)
   async function insertShift(q, withNote, withExitDate) {
     const cols = ['company_id', 'driver_id', 'shift_date', 'taxi_id', 'entry_time', 'entry_km', 'exit_time', 'exit_km',
       'entry_lat', 'entry_lng', 'exit_lat', 'exit_lng'];
