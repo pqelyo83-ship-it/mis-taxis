@@ -940,14 +940,17 @@
     var cuando = (relevo.exit_date && relevo.exit_date !== todayLocal()) ? ' (cierre del ' + esc(relevo.exit_date) + ')' : '';
     return '<p class="muted" id="relevo-banner">Relevo de ' + esc(relevo.driver_name) +
       ' · El taxi quedó con ' + esc(relevo.exit_km) + ' km a las ' + esc(String(relevo.exit_time).slice(0, 5)) + cuando +
-      '. Se precargaron hora y km de entrada; podés corregirlos.</p>';
+      '. Se precargó el km de entrada; la hora es la actual y podés corregirla.</p>';
   }
+  // Relevo: se precarga SOLO el km de entrada con el km del cierre
+  // anterior (el km es del auto). La hora de entrada NUNCA se copia del
+  // cierre anterior: es la hora actual, cuando el chofer recibe el auto
+  // (v14, Nov 2026: copiar la hora del cierre le ponía, por ejemplo,
+  // 20:00 de entrada a quien abría a la mañana).
   function relevoPrefill(form, relevo, tocado) {
     if (!form || !relevo) return false;
     if (relevo.exit_km === null || relevo.exit_km === undefined) return false;
-    if (relevo.exit_time === null || relevo.exit_time === undefined) return false;
     if (!tocado || !tocado.km) form.entry_km.value = relevo.exit_km;
-    if (!tocado || !tocado.time) form.entry_time.value = String(relevo.exit_time).slice(0, 5);
     return true;
   }
   async function relevoBuscar(taxiId, date) {
