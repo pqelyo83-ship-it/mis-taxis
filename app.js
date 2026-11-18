@@ -2117,12 +2117,15 @@
       var total = Number(c.total_collected) || 0;
       var pct = maxHoy > 0 ? Math.round(total / maxHoy * 100) : 0;
       var perKm = (c.km_driven && Number(c.km_driven) > 0) ? money(total / Number(c.km_driven)) + '/km' : '—';
+      var kmLine = (c.shift_entry_km !== null && c.shift_entry_km !== undefined)
+        ? ' · Entrada: ' + esc(c.shift_entry_km) + ' km' + ((c.km_driven !== null && c.km_driven !== undefined) ? ' · ' + esc(c.km_driven) + ' km recorridos' : '')
+        : '';
       var note = '';
       if (!c.shift_entry_time) note = ' · Sin jornada';
       else if (!c.shift_exit_time) note = ' · Jornada abierta';
       return '<div class="card" data-driver-detail="' + c.driver_id + '" style="cursor:pointer" title="Ver ficha del chofer"><p><strong>#' + (i + 1) + ' ' + esc(c.driver_name) + '</strong>' +
         (i === 0 && total > 0 ? ' · <strong>Mejor del día</strong>' : '') +
-        ' · ' + money(total) + ' · ' + esc(c.trips_count) + ' viajes · ' + perKm +
+        ' · ' + money(total) + ' · ' + esc(c.trips_count) + ' viajes · ' + perKm + kmLine +
         ' · ' + handoverCashLine(c, 'El dueño le debe') + note + ' · <span class="muted">Ver ficha ›</span></p>' +
         '<div class="perf-bar"><div class="perf-bar-fill" style="width: ' + pct + '%"></div></div></div>';
     }).join('');
@@ -2758,7 +2761,8 @@
         ? '<p>Taxi del día: ' + esc(c.shift_taxi) +
           (c.shift_entry_time ? ' · Entrada: ' + esc(c.shift_entry_time) + ' · ' + esc(c.shift_entry_km) + ' km' : '') +
           (c.shift_exit_time ? ' · Salida: ' + ((c.exit_date && c.exit_date !== c.date) ? esc(c.exit_date) + ' ' : '') + esc(c.shift_exit_time) + ' · ' + esc(c.shift_exit_km) + ' km' : '') + '</p>' +
-          (c.km_driven !== null && c.km_driven !== undefined ? '<p>Km recorridos: ' + esc(c.km_driven) + ' km</p>' : '')
+          (c.km_driven !== null && c.km_driven !== undefined ? '<p>Km recorridos: ' + esc(c.km_driven) + ' km</p>' : '') +
+          '<p>Recaudado por km: <strong>' + ((c.km_driven && Number(c.km_driven) > 0) ? money(Number(c.total_collected) / Number(c.km_driven)) + '/km' : '—') + '</strong></p>'
         : '<p class="muted">Sin jornada cargada para ese día.</p>';
       return '<div class="card"><h3>' + esc(c.driver_name) + ' · ' + dateLabel + '</h3>' +
         '<p>Viajes: ' + esc(c.trips_count) + '</p>' + shiftLine +
